@@ -38,9 +38,11 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QScrollArea,
     QCheckBox,
+    QDialog,
+    QGraphicsDropShadowEffect,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QSettings
-from PySide6.QtGui import QPixmap, QFont, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QPixmap, QFont, QDragEnterEvent, QDropEvent, QColor
 
 # Add parent directory to path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +58,361 @@ from core.credit_manager import (
     mark_generation_complete,
     CREDIT_COSTS,
 )
+
+
+class CompletionDialog(QDialog):
+    """
+    Beautiful completion modal shown after 3D model generation.
+    Matches the web app's design with format cards, Open/Save buttons.
+    """
+
+    def __init__(self, parent, result: dict, is_trial: bool = False):
+        super().__init__(parent)
+        self.result = result
+        self.is_trial = is_trial
+        self.setWindowTitle("Generation Complete")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self.setMaximumWidth(640)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        # Outer layout for shadow margin
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 20, 20, 20)
+
+        # Main container with rounded corners
+        container = QFrame()
+        container.setObjectName("completionContainer")
+        container.setStyleSheet("""
+            #completionContainer {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #0f172a, stop:1 #0c1222);
+                border: 1px solid #334155;
+                border-radius: 16px;
+            }
+        """)
+
+        # Add drop shadow effect
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(50)
+        shadow.setXOffset(0)
+        shadow.setYOffset(12)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        container.setGraphicsEffect(shadow)
+
+        layout = QVBoxLayout(container)
+        layout.setSpacing(0)
+        layout.setContentsMargins(32, 32, 32, 32)
+
+        # ── Celebration Emoji ──
+        emoji = QLabel("🎉")
+        emoji.setAlignment(Qt.AlignCenter)
+        emoji.setStyleSheet("font-size: 52px; background: transparent; margin-bottom: 8px;")
+        layout.addWidget(emoji)
+
+        # ── Title ──
+        if self.is_trial:
+            title = QLabel("First Generation Complete!")
+        else:
+            title = QLabel("Model Generated Successfully!")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            font-size: 24px;
+            font-weight: 700;
+            color: #f8fafc;
+            background: transparent;
+            margin-bottom: 4px;
+        """)
+        layout.addWidget(title)
+
+        # ── Subtitle ──
+        if self.is_trial:
+            subtitle_text = "Your first 3D model is FREE! Select a format below to open or save it."
+        else:
+            subtitle_text = "Your 3D model is ready. Select a format below to open or download it."
+        subtitle = QLabel(subtitle_text)
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("""
+            font-size: 14px;
+            color: #94a3b8;
+            background: transparent;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        """)
+        layout.addWidget(subtitle)
+
+        # ── Format Cards Grid ──
+        format_defs = [
+            ("obj", "OBJ", "🧊", "#3b82f6"),
+            ("glb", "GLB", "🌐", "#10b981"),
+            ("stl", "STL", "🏗️", "#f59e0b"),
+            ("fbx", "FBX", "📐", "#8b5cf6"),
+            ("usdz", "USDZ", "📱", "#ec4899"),
+        ]
+
+        cards_layout = QHBoxLayout()
+        cards_layout.setSpacing(12)
+
+        has_formats = False
+        for fmt_key, fmt_label, fmt_icon, fmt_color in format_defs:
+            if self.result.get(fmt_key):
+                has_formats = True
+                card = self._create_format_card(
+                    fmt_key, fmt_label, fmt_icon, fmt_color,
+                    self.result[fmt_key]
+                )
+                cards_layout.addWidget(card)
+
+        if has_formats:
+            layout.addLayout(cards_layout)
+        else:
+            no_files = QLabel("No output files generated.")
+            no_files.setAlignment(Qt.AlignCenter)
+            no_files.setStyleSheet("color: #64748b; font-size: 13px; background: transparent; margin: 16px 0;")
+            layout.addWidget(no_files)
+
+        # ── Spacer ──
+        layout.addSpacing(24)
+
+        # ── Trial upsell text ──
+        if self.is_trial:
+            upsell = QLabel("💎 Buy credits to generate more models!")
+            upsell.setAlignment(Qt.AlignCenter)
+            upsell.setStyleSheet("""
+                font-size: 13px;
+                color: #60a5fa;
+                background: transparent;
+                margin-bottom: 16px;
+                font-weight: 600;
+            """)
+            layout.addWidget(upsell)
+
+        # ── Action Buttons ──
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        btn_layout.setAlignment(Qt.AlignCenter)
+
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                padding: 12px 24px;
+                border-radius: 8px;
+                font-weight: 600;
+                border: 1px solid #334155;
+                background: #1e293b;
+                color: #e2e8f0;
+                font-size: 15px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background: #334155;
+                border-color: #475569;
+            }
+        """)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+
+        folder_btn = QPushButton("📂 Output Folder")
+        folder_btn.setStyleSheet("""
+            QPushButton {
+                padding: 12px 24px;
+                border-radius: 8px;
+                font-weight: 600;
+                border: none;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #3b82f6, stop:1 #2563eb);
+                color: white;
+                font-size: 15px;
+                min-width: 140px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2563eb, stop:1 #1d4ed8);
+            }
+        """)
+        folder_btn.setCursor(Qt.PointingHandCursor)
+        folder_btn.clicked.connect(self._open_output_folder)
+        btn_layout.addWidget(folder_btn)
+
+        if self.is_trial:
+            buy_btn = QPushButton("💳 Buy Credits")
+            buy_btn.setStyleSheet("""
+                QPushButton {
+                    padding: 12px 24px;
+                    border-radius: 8px;
+                    font-weight: 600;
+                    border: none;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #22c55e, stop:1 #16a34a);
+                    color: white;
+                    font-size: 15px;
+                    min-width: 130px;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #16a34a, stop:1 #15803d);
+                }
+            """)
+            buy_btn.setCursor(Qt.PointingHandCursor)
+            buy_btn.clicked.connect(self._on_buy_credits)
+            btn_layout.addWidget(buy_btn)
+
+        layout.addLayout(btn_layout)
+
+        outer.addWidget(container)
+
+    def _create_format_card(self, fmt_key, fmt_label, fmt_icon, fmt_color, file_path):
+        """Create a single format card with icon, label, file name, Open and Save buttons."""
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 12px;
+                padding: 0px;
+            }}
+            QFrame:hover {{
+                border-color: {fmt_color};
+                background: #1e293b;
+            }}
+        """)
+        card.setMinimumWidth(120)
+        card.setMaximumWidth(160)
+
+        layout = QVBoxLayout(card)
+        layout.setSpacing(6)
+        layout.setContentsMargins(12, 14, 12, 14)
+
+        # Icon
+        icon_lbl = QLabel(fmt_icon)
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
+        layout.addWidget(icon_lbl)
+
+        # Format label
+        name_lbl = QLabel(fmt_label)
+        name_lbl.setAlignment(Qt.AlignCenter)
+        name_lbl.setStyleSheet(f"""
+            font-weight: 700;
+            color: {fmt_color};
+            font-size: 15px;
+            background: transparent;
+        """)
+        layout.addWidget(name_lbl)
+
+        # Filename
+        filename = Path(file_path).name if file_path else "—"
+        file_lbl = QLabel(filename)
+        file_lbl.setAlignment(Qt.AlignCenter)
+        file_lbl.setStyleSheet("font-size: 10px; color: #64748b; background: transparent;")
+        file_lbl.setToolTip(filename)
+        file_lbl.setMaximumWidth(140)
+        layout.addWidget(file_lbl)
+
+        layout.addSpacing(4)
+
+        # Open button
+        open_btn = QPushButton("👁️ Open")
+        open_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: #334155;
+                border: 1px solid #475569;
+                color: white;
+                padding: 7px;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {fmt_color};
+                border-color: {fmt_color};
+            }}
+        """)
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.clicked.connect(lambda: self._open_file(file_path))
+        layout.addWidget(open_btn)
+
+        # Save button
+        save_btn = QPushButton("💾 Save")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px solid #334155;
+                color: #94a3b8;
+                padding: 7px;
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                border-color: #60a5fa;
+                color: #e2e8f0;
+            }
+        """)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(lambda: self._save_file(file_path, fmt_label))
+        layout.addWidget(save_btn)
+
+        return card
+
+    def _open_file(self, file_path):
+        """Open file with system default application."""
+        import subprocess
+        try:
+            if os.name == "nt":
+                os.startfile(file_path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", file_path])
+            else:
+                subprocess.run(["xdg-open", file_path])
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open file: {e}")
+
+    def _save_file(self, source_path, fmt_label):
+        """Save file to user-chosen location."""
+        import shutil
+        default_name = Path(source_path).name
+        ext = Path(source_path).suffix
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Save {fmt_label}",
+            default_name,
+            f"{fmt_label} Files (*{ext});;All Files (*)",
+        )
+        if file_path:
+            try:
+                shutil.copy2(source_path, file_path)
+                QMessageBox.information(
+                    self, "Saved", f"File saved successfully to:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Could not save file: {e}")
+
+    def _open_output_folder(self):
+        """Open the output folder and close the dialog."""
+        import subprocess
+        # Find output directory from any result path
+        for fmt in ["obj", "glb", "stl", "fbx", "usdz"]:
+            if self.result.get(fmt):
+                output_dir = str(Path(self.result[fmt]).parent)
+                if os.name == "nt":
+                    subprocess.run(["explorer", output_dir])
+                else:
+                    subprocess.run(["xdg-open", output_dir])
+                break
+        self.accept()
+
+    def _on_buy_credits(self):
+        """Open buy credits dialog."""
+        self.accept()
+        parent = self.parent()
+        if hasattr(parent, '_on_buy_credits'):
+            parent._on_buy_credits()
 
 
 class GenerationWorker(QThread):
@@ -2081,7 +2438,7 @@ class MainWindow(QMainWindow):
 
         # Log outputs
         outputs = []
-        for fmt in ["obj", "stl", "glb"]:
+        for fmt in ["obj", "stl", "glb", "fbx", "usdz"]:
             if result.get(fmt):
                 outputs.append(fmt.upper())
 
@@ -2097,7 +2454,7 @@ class MainWindow(QMainWindow):
 
                 # Collect model files
                 model_files = {}
-                for fmt in ["obj", "stl", "glb"]:
+                for fmt in ["obj", "stl", "glb", "fbx", "usdz"]:
                     if result.get(fmt):
                         model_files[fmt] = result[fmt]
 
@@ -2129,27 +2486,17 @@ class MainWindow(QMainWindow):
         # Store result paths for Open/Save buttons
         self._last_result = result
 
-        # After first generation (trial), prompt to buy credits
+        # Show beautiful completion modal (matches web app)
         is_trial = getattr(self, "_is_trial_generation", False)
         if is_trial:
             self._add_log(
                 "🎉 Your first generation is FREE! Buy credits for more generations."
             )
-            reply = QMessageBox.question(
-                self,
-                "First Generation Complete!",
-                "🎉 Your first 3D model generation is FREE!\n\n"
-                "Would you like to buy credits for more generations?\n\n"
-                "Credit packs available:\n"
-                "• Micro: 40 credits - ₹99\n"
-                "• Small: 100 credits - ₹199\n"
-                "• Medium: 500 credits - ₹799\n"
-                "• Large: 2000 credits - ₹2499",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply == QMessageBox.Yes:
-                self._on_buy_credits()
+
+        dialog = CompletionDialog(self, result, is_trial=is_trial)
+        dialog.exec()
+
+        if is_trial:
             self._is_trial_generation = False  # Reset flag
             # Refresh after trial prompt
             QTimer.singleShot(300, self._refresh_credit_balance)
