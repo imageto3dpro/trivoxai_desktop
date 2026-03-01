@@ -1,0 +1,32 @@
+Trivox Models Desktop Application
+Software License Agreement
+
+Copyright (c) 2024 Trivox Models. All rights reserved.
+
+GRANT OF LICENSE
+This license agreement grants you the right to use Trivox Models Desktop Application 
+for personal or commercial purposes, subject to the terms below.
+
+RESTRICTIONS
+You may not:
+- Reverse engineer, decompile, or disassemble this software
+- Rent, lease, or lend the software to third parties
+- Remove or alter any proprietary notices
+
+DISCLAIMER
+THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES 
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+LIMITATION OF LIABILITY
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY 
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, 
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Third-Party Licenses
+This software uses third-party libraries which are subject to their own licenses:
+- PySide6 (LGPL)
+- Tripo3D SDK
+- Supabase Client
+- And other open-source libraries as listed in requirements.txt

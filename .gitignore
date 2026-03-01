@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# PyInstaller
+*.manifest
+*.spec
+!TrivoxModels.spec
+build/
+dist/
+*.exe
+*.dmg
+*.pkg
+
+# Application specific
+*.log
+*.tmp
+*.temp
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Installer output
+installer/output/
+*.zip
+
+# Test outputs
+test_out.txt
+output.txt
+nul
+
+# Model files and large binaries
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.h5
+*.pb
+
+# User data
+*.json
+!config/*.json
+!config/device_fp.json
+
+# Local cache
+.trivoxmodels/

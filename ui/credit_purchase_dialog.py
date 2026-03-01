@@ -1,0 +1,488 @@
+"""
+Credit Purchase Dialog - Improved version of Buy Credits functionality
+"""
+
+import webbrowser
+from typing import Dict, Any, Optional
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QGroupBox,
+    QScrollArea,
+    QFrame,
+    QGridLayout,
+    QSpacerItem,
+    QSizePolicy,
+    QMessageBox,
+    QWidget,
+    QComboBox,
+)
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QFont, QPixmap
+
+from core.credit_manager import CREDIT_PACKS
+from core.payment_handler import get_payment_handler, PaymentHandler
+
+
+class CreditPurchaseDialog(QDialog):
+    """
+    Dialog for purchasing credits with dynamic gateway integration.
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        current_balance: int = 0,
+        user_id: str = "",
+        user_email: str = "",
+    ):
+        super().__init__(parent)
+        self.current_balance = current_balance
+        self.user_id = user_id
+        self.user_email = user_email
+        self.setWindowTitle("Buy Credits")
+        self.setMinimumSize(600, 500)
+        self.setModal(True)
+
+        # Initialize payment handler
+        self.payment_handler: Optional[PaymentHandler] = get_payment_handler()
+
+        # Connect payment handler signals
+        if self.payment_handler:
+            self.payment_handler.payment_completed.connect(self._on_payment_completed)
+            self.payment_handler.payment_failed.connect(self._on_payment_failed)
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Setup the dialog UI."""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Title
+        title = QLabel("💳 Purchase Credits")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #e2e8f0;")
+        layout.addWidget(title)
+
+        # Current Balance
+        balance_frame = QFrame()
+        balance_frame.setObjectName("infoCard")
+        balance_layout = QHBoxLayout(balance_frame)
+        balance_layout.setSpacing(8)
+        balance_layout.setContentsMargins(16, 12, 16, 12)
+
+        balance_label = QLabel("Current Balance:")
+        balance_label.setStyleSheet("color: #94a3b8; font-size: 14px;")
+        balance_value = QLabel(f"{self.current_balance} credits")
+        balance_value.setStyleSheet(
+            "color: #4ade80; font-size: 16px; font-weight: bold;"
+        )
+
+        balance_layout.addWidget(balance_label)
+        balance_layout.addStretch()
+        balance_layout.addWidget(balance_value)
+
+        layout.addWidget(balance_frame)
+
+        # Credit Packs Section
+        packs_group = QGroupBox("Credit Packs")
+        packs_group.setObjectName("sectionCard")
+        packs_layout = QVBoxLayout(packs_group)
+        packs_layout.setSpacing(12)
+        packs_layout.setContentsMargins(16, 20, 16, 16)
+
+        # Create scroll area for packs
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("contentScroll")
+
+        # Container widget for packs
+        packs_container = QWidget()
+        packs_layout_inner = QVBoxLayout(packs_container)
+        packs_layout_inner.setSpacing(12)
+
+        # Add credit packs
+        active_gateway = self._get_active_gateway()
+
+        for pack_id, pack_info in CREDIT_PACKS.items():
+            # Check if pack has ID for the active gateway
+            gateway_key = f"{active_gateway}_id"
+            if pack_info.get(gateway_key) or pack_info.get(
+                "gumroad_id"
+            ):  # Fallback to gumroad_id for backwards compat
+                pack_card = self._create_pack_card(pack_id, pack_info, active_gateway)
+                packs_layout_inner.addWidget(pack_card)
+
+        # Add empty state if no packs
+        has_packs = False
+        for pack in CREDIT_PACKS.values():
+            if pack.get(f"{active_gateway}_id") or pack.get("gumroad_id"):
+                has_packs = True
+                break
+
+        if not has_packs:
+            empty_label = QLabel("No credit packs available")
+            empty_label.setStyleSheet("color: #64748b; font-size: 14px;")
+            empty_label.setAlignment(Qt.AlignCenter)
+            packs_layout_inner.addWidget(empty_label)
+
+        scroll.setWidget(packs_container)
+        packs_layout.addWidget(scroll)
+
+        layout.addWidget(packs_group)
+
+        # Instructions
+        instructions = QLabel(
+            "💡 After purchasing, your credits will be automatically added to your account. "
+            "Check back in a few minutes if you don't see them immediately."
+        )
+        instructions.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(12)
+
+        # Cancel button
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("secondaryButton")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        buttons_layout.addWidget(cancel_btn)
+
+        buttons_layout.addStretch()
+
+        # Refresh button
+        refresh_btn = QPushButton("↻ Refresh")
+        refresh_btn.setObjectName("secondaryButton")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.clicked.connect(self._refresh_balance)
+        buttons_layout.addWidget(refresh_btn)
+
+        layout.addLayout(buttons_layout)
+
+    def _create_pack_card(
+        self, pack_id: str, pack_info: Dict[str, Any], active_gateway: str
+    ) -> QFrame:
+        """Create a credit pack card."""
+        card = QFrame()
+        card.setObjectName("packCard")
+        card.setCursor(Qt.PointingHandCursor)
+        card.setFrameStyle(QFrame.Box)
+        card.setStyleSheet("""
+            #packCard {
+                background-color: #1a2332;
+                border: 1px solid #1e3a5f;
+                border-radius: 8px;
+                padding: 16px;
+            }
+            #packCard:hover {
+                border-color: #3b82f6;
+                background-color: #1e293b;
+            }
+        """)
+
+        layout = QVBoxLayout(card)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Pack header
+        header_layout = QHBoxLayout()
+
+        # Credits badge
+        badge = QLabel(f"+{pack_info['credits']}")
+        badge.setStyleSheet("""
+            background-color: #3b82f6;
+            color: white;
+            border-radius: 20px;
+            padding: 4px 12px;
+            font-weight: bold;
+            font-size: 14px;
+        """)
+        header_layout.addWidget(badge)
+
+        # Pack name
+        name = QLabel(pack_info["name"])
+        name.setStyleSheet("font-size: 16px; font-weight: bold; color: #e2e8f0;")
+        header_layout.addWidget(name)
+        header_layout.addStretch()
+
+        layout.addLayout(header_layout)
+
+        # Price
+        price_val = pack_info["price"]
+        currency_sym = "₹" if active_gateway == "razorpay" else "$"
+        price = QLabel(f"{currency_sym}{price_val}")
+        price.setStyleSheet("font-size: 20px; font-weight: bold; color: #4ade80;")
+        price.setAlignment(Qt.AlignCenter)
+        layout.addWidget(price)
+
+        # Value per credit
+        if pack_info["credits"] > 0:
+            value_per = pack_info["price"] / pack_info["credits"]
+            value_label = QLabel(f"{currency_sym}{value_per:.2f} per credit")
+            value_label.setStyleSheet("color: #64748b; font-size: 12px;")
+            value_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(value_label)
+
+        # Buy button
+        buy_btn = QPushButton("🛒 Buy Now")
+        buy_btn.setObjectName("primaryButton")
+        buy_btn.setCursor(Qt.PointingHandCursor)
+        buy_btn.clicked.connect(lambda: self._purchase_pack(pack_id, active_gateway))
+        layout.addWidget(buy_btn)
+
+        # Store pack ID for later use
+        card.pack_id = pack_id
+
+        return card
+
+    def _get_active_gateway(self) -> str:
+        """Get the current active payment gateway."""
+        try:
+            from core.admin_manager import PaymentGatewayManager
+
+            return PaymentGatewayManager().get_active_gateway()
+        except Exception:
+            return "gumroad"
+
+    def _purchase_pack(self, pack_id: str, active_gateway: str):
+        """Handle purchase of a credit pack using the active gateway."""
+        pack_info = CREDIT_PACKS.get(pack_id)
+        if not pack_info:
+            QMessageBox.warning(self, "Error", "This credit pack is not available.")
+            return
+
+        # Get user ID from parent session manager
+        user_id = self.user_id
+        if not user_id and hasattr(self.parent(), "session_manager"):
+            user_id = self.parent().session_manager.user_id
+
+        if not user_id:
+            QMessageBox.warning(
+                self, "Error", "User not logged in. Please log in to purchase credits."
+            )
+            return
+
+        if active_gateway == "razorpay":
+            self._purchase_with_razorpay(pack_id, pack_info, user_id)
+        else:
+            # Default: Gumroad
+            self._purchase_with_gumroad(pack_id, pack_info)
+
+    def _purchase_with_razorpay(
+        self, pack_id: str, pack_info: Dict[str, Any], user_id: str
+    ):
+        """Purchase credits using secure Razorpay integration."""
+        # Check if secure Razorpay is available
+        if self.payment_handler and self.payment_handler.is_available():
+            # Use secure order-based payment
+            order = self.payment_handler.create_order_for_pack(
+                pack_id=pack_id, user_id=user_id, email=self.user_email
+            )
+
+            if order:
+                # Open standard Razorpay checkout
+                checkout_url = f"https://checkout.razorpay.com/v1/checkout.js?order_id={order['id']}"
+                webbrowser.open(checkout_url)
+
+                # Show message
+                QMessageBox.information(
+                    self,
+                    "Purchase Started",
+                    f"✅ Order created successfully!\n\n"
+                    f"Order ID: {order['id']}\n"
+                    f"Pack: {pack_info['name']}\n"
+                    f"Price: ₹{pack_info['price']}\n\n"
+                    f"Complete the payment in the browser. Your credits will be added automatically.",
+                )
+
+                # Start polling for payment completion
+                self.payment_handler.start_payment_polling(
+                    user_id=user_id,
+                    expected_credits=pack_info["credits"],
+                    callback=self._on_payment_poll_result,
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Payment Error",
+                    "Failed to create Razorpay order. Please try again or contact support.",
+                )
+        else:
+            # Fallback to Payment Link method
+            razorpay_id = pack_info.get("razorpay_id")
+            if not razorpay_id:
+                QMessageBox.warning(
+                    self,
+                    "Not Configured",
+                    "Razorpay is not properly configured. Please contact support.",
+                )
+                return
+
+            # Use Payment Link
+            purchase_url = f"https://rzp.io/l/{razorpay_id}"
+            if user_id:
+                purchase_url += f"?notes[user_id]={user_id}"
+
+            webbrowser.open(purchase_url)
+
+            QMessageBox.information(
+                self,
+                "Purchase Started",
+                f"✅ You will be redirected to complete your purchase using Razorpay.\n\n"
+                f"Pack: {pack_info['name']}\n"
+                f"Price: ₹{pack_info['price']}\n\n"
+                f"Your credits will be added automatically after payment.",
+            )
+
+            # Start legacy polling
+            self._start_polling()
+
+    def _purchase_with_gumroad(self, pack_id: str, pack_info: Dict[str, Any]):
+        """Purchase credits using Gumroad."""
+        gumroad_id = pack_info.get("gumroad_id")
+        if not gumroad_id:
+            QMessageBox.warning(self, "Error", "Payment not available for this pack.")
+            return
+
+        purchase_url = f"https://trivoxmodels.gumroad.com/l/{gumroad_id}"
+        webbrowser.open(purchase_url)
+
+        QMessageBox.information(
+            self,
+            "Purchase Started",
+            f"✅ You will be redirected to complete your purchase using Gumroad.\n\n"
+            f"Pack: {pack_info['name']}\n"
+            f"Price: ${pack_info['price']}\n\n"
+            f"Your credits will be added automatically after payment.",
+        )
+
+        # Start polling for balance update
+        self._start_polling()
+
+    def _on_payment_poll_result(self, success: bool, credits_added: int):
+        """Handle payment polling result."""
+        if success:
+            # PaymentHandler signals will handle the success message
+            pass
+        else:
+            QMessageBox.warning(
+                self,
+                "Payment Pending",
+                "⏰ Payment is still processing. Your credits may take a few minutes to appear.\n\n"
+                "If you don't see your credits after 10 minutes, please contact support.",
+            )
+
+    def _start_polling(self):
+        """Start polling for credit balance update."""
+        from core.credit_manager import get_user_balance
+        from PySide6.QtCore import QTimer
+
+        self._poll_timer = QTimer()
+        self._poll_timer.timeout.connect(self._check_balance_update)
+        self._poll_timer.start(5000)  # Check every 5 seconds
+
+        # Get initial balance
+        try:
+            balance_info = get_user_balance(self.parent().session_manager.user_id)
+            self._poll_initial_balance = balance_info.get("credits_balance", 0)
+        except Exception:
+            self._poll_initial_balance = self.current_balance
+
+        self._poll_count = 0
+
+    def _check_balance_update(self):
+        """Check if credits have been updated."""
+        from core.credit_manager import get_user_balance
+
+        self._poll_count += 1
+
+        try:
+            balance_info = get_user_balance(self.parent().session_manager.user_id)
+            new_balance = balance_info.get("credits_balance", 0)
+
+            if new_balance > self._poll_initial_balance:
+                # Credits added!
+                self._poll_timer.stop()
+                added = new_balance - self._poll_initial_balance
+
+                QMessageBox.information(
+                    self,
+                    "Purchase Complete!",
+                    f"✅ Credits successfully added!\n\n"
+                    f"Added: +{added} credits\n"
+                    f"New balance: {new_balance} credits",
+                )
+
+                # Emit signal to refresh parent
+                if hasattr(self.parent(), "_refresh_credit_balance"):
+                    self.parent()._refresh_credit_balance()
+
+                self.accept()
+                return
+
+        except Exception:
+            pass
+
+        # Timeout after 5 minutes (60 * 5 seconds)
+        if self._poll_count > 60:
+            self._poll_timer.stop()
+            QMessageBox.warning(
+                self,
+                "Polling Timeout",
+                "⏰ Credit polling timed out. Your credits may still be processing.\n\n"
+                "If you don't see your credits after 10 minutes, please contact support.",
+            )
+
+    def _on_payment_completed(self, order_id: str, credits_added: int):
+        """Handle successful payment completion."""
+        QMessageBox.information(
+            self,
+            "Payment Successful!",
+            f"✅ Payment completed successfully!\n\n"
+            f"Order ID: {order_id}\n"
+            f"Credits Added: +{credits_added}\n\n"
+            f"Your credits have been added to your account.",
+        )
+
+        # Refresh parent balance
+        if hasattr(self.parent(), "_refresh_credit_balance"):
+            self.parent()._refresh_credit_balance()
+
+        self.accept()
+
+    def _on_payment_failed(self, order_id: str, error_message: str):
+        """Handle payment failure."""
+        QMessageBox.critical(
+            self,
+            "Payment Failed",
+            f"❌ Payment failed for order: {order_id}\n\n"
+            f"Error: {error_message}\n\n"
+            f"Please try again or contact support if the issue persists.",
+        )
+
+    def _refresh_balance(self):
+        """Refresh the current balance display."""
+        if hasattr(self.parent(), "_refresh_credit_balance"):
+            self.parent()._refresh_credit_balance()
+
+            # Update current balance
+            try:
+                from core.credit_manager import get_user_balance
+
+                balance_info = get_user_balance(self.parent().session_manager.user_id)
+                self.current_balance = balance_info.get("credits_balance", 0)
+
+                # Recreate the dialog to show updated balance
+                self.close()
+                new_dialog = CreditPurchaseDialog(self.parent(), self.current_balance)
+                new_dialog.exec()
+            except Exception:
+                pass

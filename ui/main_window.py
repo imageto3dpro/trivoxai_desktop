@@ -1,0 +1,2021 @@
+"""
+Main Window for Image → 3D Pro Desktop Application
+
+UI Design matches the specification in UI_DESIGN_SPECIFICATION.md
+- Dark theme with sidebar layout
+- All backend functionality preserved from existing core modules
+"""
+
+import os
+import sys
+import platform
+import psutil
+import asyncio
+from pathlib import Path
+from datetime import datetime
+from typing import Optional, Dict, Any
+
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QFrame,
+    QGroupBox,
+    QComboBox,
+    QProgressBar,
+    QPlainTextEdit,
+    QFileDialog,
+    QMessageBox,
+    QLineEdit,
+    QRadioButton,
+    QButtonGroup,
+    QStackedWidget,
+    QSizePolicy,
+    QSpacerItem,
+    QGridLayout,
+    QScrollArea,
+    QCheckBox,
+)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QSettings
+from PySide6.QtGui import QPixmap, QFont, QDragEnterEvent, QDropEvent
+
+# Add parent directory to path
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from core.session_manager import SessionManager
+from core.unified_pipeline import run_pipeline_async, get_available_models
+from core.credit_manager import (
+    get_user_balance,
+    can_generate,
+    deduct_credits,
+    mark_generation_complete,
+    CREDIT_COSTS,
+)
+
+
+class GenerationWorker(QThread):
+    """Worker thread for 3D model generation."""
+
+    progress = Signal(int)
+    status = Signal(str)
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        image_path: str,
+        model: str,
+        resolution: str,
+        api_model: str = None,
+        output_formats: list = None,
+        quality: str = "standard",
+    ):
+        super().__init__()
+        self.image_path = image_path
+        self.model = model  # "local" or "cloud"
+        self.resolution = resolution  # e.g., "1024", "1536", "1536pro"
+        self.api_model = api_model  # e.g., "hitem3dv1.5", "scene-portraitv2.1"
+        self.output_formats = output_formats or ["obj", "stl", "glb"]
+        self.quality = quality
+        self._is_running = True
+
+    def run(self):
+        try:
+            from core.unified_pipeline import run_pipeline_async
+            from config.settings import get_output_dir
+
+            self.status.emit("Initializing...")
+
+            # Determine if using API or local
+            use_api = self.model == "cloud"
+
+            # Get output directory
+            output_dir = str(get_output_dir())
+
+            # Progress callback to route pipeline progress to UI signals
+            def progress_callback(stage, pct, msg):
+                self.progress.emit(int(pct))
+                self.status.emit(msg)
+
+            self.progress.emit(5)
+            self.status.emit("Processing image...")
+
+            # Run the pipeline
+            if use_api:
+                result = asyncio.run(
+                    run_pipeline_async(
+                        self.image_path,
+                        use_api=True,
+                        api_model=self.api_model,
+                        api_resolution=self.resolution,
+                        api_format=",".join(self.output_formats),
+                        output_dir=output_dir,
+                        quality="standard",
+                        progress_callback=progress_callback,
+                    )
+                )
+            else:
+                result = asyncio.run(
+                    run_pipeline_async(
+                        self.image_path,
+                        use_api=False,
+                        output_dir=output_dir,
+                        quality=self.quality,
+                        progress_callback=progress_callback,
+                    )
+                )
+
+            # CHECK FOR ERRORS in result
+            if result.get("error") or result.get("error_message"):
+                error_msg = result.get("error") or result.get("error_message")
+                self.error.emit(f"Generation failed: {error_msg}")
+                return
+
+            # Verify output files actually exist
+            if not any(result.get(fmt) for fmt in ["obj", "stl", "glb"]):
+                self.error.emit(
+                    "Generation produced no output files. Check system requirements (open3d, torch)."
+                )
+                return
+
+            self.progress.emit(100)
+            self.status.emit("Complete!")
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def stop(self):
+        self._is_running = False
+
+
+class MainWindow(QMainWindow):
+    """
+    Main application window for Image → 3D Pro.
+
+    Layout:
+    - Left sidebar (280px): Logo, Device info, System info, Log Out, Quit
+    - Main content: Source, Processing, Preview, Progress, Actions, Outputs, Activity Log
+    """
+
+    def __init__(self, session_manager: SessionManager):
+        super().__init__()
+
+        self.session_manager = session_manager
+        self.selected_file: Optional[str] = None
+        self.output_dir = Path.home() / "TrivoxModels" / "outputs"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.worker: Optional[GenerationWorker] = None
+        self.start_time: Optional[datetime] = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._update_timer)
+
+        # Current generation parameters
+        self._current_model: str = "local"
+        self._current_quality: str = "standard"
+
+        self.setWindowTitle("Image → 3D Pro")
+        self.setMinimumSize(1200, 800)
+        self.resize(1400, 900)
+
+        self._setup_ui()
+        self._setup_connections()
+        self._load_stylesheet()
+
+        # Refresh credit balance after UI is setup
+        self._refresh_credit_balance()
+
+        # Force trial settings after window is shown
+        QTimer.singleShot(100, self._enforce_trial_settings)
+
+    def _setup_ui(self):
+        """Setup the main window UI with sidebar + content layout."""
+        # Central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        # Main layout: Sidebar + Content
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left Sidebar (280px fixed)
+        self.sidebar = self._create_sidebar()
+        self.sidebar.setFixedWidth(280)
+        self.sidebar.setObjectName("sidebar")
+        main_layout.addWidget(self.sidebar)
+
+        # Main Content Area
+        self.content_area = self._create_content_area()
+        self.content_area.setObjectName("contentArea")
+        main_layout.addWidget(self.content_area, 1)
+
+    def _create_sidebar(self) -> QWidget:
+        """Create the left sidebar with logo, device info, system info, and actions."""
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        layout = QVBoxLayout(sidebar)
+        layout.setSpacing(16)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Logo Section
+        logo_widget = self._create_logo_section()
+        layout.addWidget(logo_widget)
+
+        # DEVICE Card
+        device_card = self._create_device_card()
+        layout.addWidget(device_card)
+
+        # CREDIT Card
+        self.credit_card = self._create_credit_card()
+        layout.addWidget(self.credit_card)
+
+        # SYSTEM Card
+        system_card = self._create_system_card()
+        layout.addWidget(system_card)
+
+        # Spacer
+        layout.addStretch(1)
+
+        # Action Buttons
+        actions_widget = self._create_sidebar_actions()
+        layout.addWidget(actions_widget)
+
+        return sidebar
+
+    def _create_logo_section(self) -> QWidget:
+        """Create the logo and title section."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Logo and Title
+        title_layout = QHBoxLayout()
+        title_layout.setSpacing(8)
+
+        brain_icon = QLabel("🧠")
+        brain_icon.setStyleSheet("font-size: 24px;")
+        title_layout.addWidget(brain_icon)
+
+        title_text = QLabel("Image → 3D Pro")
+        title_text.setStyleSheet("font-size: 18px; font-weight: bold; color: #e2e8f0;")
+        title_layout.addWidget(title_text)
+        title_layout.addStretch()
+
+        layout.addLayout(title_layout)
+
+        # Version
+        version = QLabel("v2.1.0")
+        version.setStyleSheet("font-size: 11px; color: #64748b; padding-left: 32px;")
+        layout.addWidget(version)
+
+        return widget
+
+    def _create_device_card(self) -> QGroupBox:
+        """Create the DEVICE info card."""
+        group = QGroupBox("🔒 DEVICE")
+        group.setObjectName("infoCard")
+
+        layout = QGridLayout(group)
+        layout.setSpacing(8)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Get device info
+        device_id = self.session_manager.device_fingerprint_short
+        hostname = platform.node()
+
+        # ID
+        id_label = QLabel("ID:")
+        id_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        id_value = QLabel(device_id)
+        id_value.setStyleSheet("color: #60a5fa; font-size: 12px; font-weight: 600;")
+        id_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(id_label, 0, 0)
+        layout.addWidget(id_value, 0, 1)
+
+        # Host
+        host_label = QLabel("Host:")
+        host_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        host_value = QLabel(hostname)
+        host_value.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+        host_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(host_label, 1, 0)
+        layout.addWidget(host_value, 1, 1)
+
+        # Status
+        status_label = QLabel("Status:")
+        status_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        status_value = QLabel("✓ Secured")
+        status_value.setStyleSheet("color: #4ade80; font-size: 12px; font-weight: 600;")
+        status_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(status_label, 2, 0)
+        layout.addWidget(status_value, 2, 1)
+
+        return group
+
+    def _create_credit_card(self) -> QGroupBox:
+        """Create the CREDIT balance card."""
+        group = QGroupBox("💰 CREDITS")
+        group.setObjectName("infoCard")
+
+        layout = QGridLayout(group)
+        layout.setSpacing(8)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Trial row
+        trial_label = QLabel("Trial:")
+        trial_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.trial_value = QLabel("-")
+        self.trial_value.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+        self.trial_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(trial_label, 0, 0)
+        layout.addWidget(self.trial_value, 0, 1)
+
+        # Credits row
+        credits_label = QLabel("Balance:")
+        credits_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.credits_value = QLabel("-")
+        self.credits_value.setStyleSheet(
+            "color: #4ade80; font-size: 14px; font-weight: 600;"
+        )
+        self.credits_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(credits_label, 1, 0)
+        layout.addWidget(self.credits_value, 1, 1)
+
+        # Used row
+        used_label = QLabel("Used:")
+        used_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.used_value = QLabel("-")
+        self.used_value.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.used_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(used_label, 2, 0)
+        layout.addWidget(self.used_value, 2, 1)
+
+        # Refresh button
+        refresh_btn = QPushButton("↻ Refresh")
+        refresh_btn.setObjectName("secondaryBtn")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.clicked.connect(self._refresh_credit_balance)
+        layout.addWidget(refresh_btn, 3, 0, 1, 2)
+
+        # Buy Credits button
+        buy_btn = QPushButton("💳 Buy Credits")
+        buy_btn.setObjectName("primaryButton")
+        buy_btn.setCursor(Qt.PointingHandCursor)
+        buy_btn.clicked.connect(self._on_buy_credits)
+        layout.addWidget(buy_btn, 4, 0, 1, 2)
+
+        return group
+
+    def _create_system_card(self) -> QGroupBox:
+        """Create the SYSTEM info card."""
+        group = QGroupBox("⚙️ SYSTEM")
+        group.setObjectName("infoCard")
+
+        layout = QGridLayout(group)
+        layout.setSpacing(8)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Get system info
+        ram = psutil.virtual_memory()
+        ram_used = ram.used / (1024**3)
+        ram_total = ram.total / (1024**3)
+        cpu_count = os.cpu_count()
+        platform_name = f"{platform.system()} {platform.release()}"
+
+        # RAM
+        ram_label = QLabel("RAM:")
+        ram_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        ram_value = QLabel(f"{ram_used:.2f} / {ram_total:.2f} GB")
+        ram_value.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+        ram_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(ram_label, 0, 0)
+        layout.addWidget(ram_value, 0, 1)
+
+        # CPU
+        cpu_label = QLabel("CPU:")
+        cpu_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        cpu_value = QLabel(str(cpu_count))
+        cpu_value.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+        cpu_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(cpu_label, 1, 0)
+        layout.addWidget(cpu_value, 1, 1)
+
+        # Platform
+        platform_label = QLabel("Platform:")
+        platform_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        platform_value = QLabel(platform_name)
+        platform_value.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+        platform_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(platform_label, 2, 0)
+        layout.addWidget(platform_value, 2, 1)
+
+        # Mode
+        mode_label = QLabel("Mode:")
+        mode_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        mode_value = QLabel("Local")
+        mode_value.setStyleSheet("color: #4ade80; font-size: 12px; font-weight: 600;")
+        mode_value.setAlignment(Qt.AlignRight)
+        layout.addWidget(mode_label, 3, 0)
+        layout.addWidget(mode_value, 3, 1)
+
+        return group
+
+    def _create_sidebar_actions(self) -> QWidget:
+        """Create Log Out and Quit buttons."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Log Out Button
+        self.logout_btn = QPushButton("🔒 Log Out")
+        self.logout_btn.setObjectName("secondaryButton")
+        self.logout_btn.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.logout_btn)
+
+        # Quit Button
+        self.quit_btn = QPushButton("✕ Quit")
+        self.quit_btn.setObjectName("dangerButton")
+        self.quit_btn.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self.quit_btn)
+
+        return widget
+
+    def _create_content_area(self) -> QWidget:
+        """Create the main content area with all sections."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("contentScroll")
+
+        content = QWidget()
+        content.setObjectName("contentWidget")
+        layout = QVBoxLayout(content)
+        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Top Row: SOURCE + PROCESSING
+        top_row = QHBoxLayout()
+        top_row.setSpacing(20)
+
+        # SOURCE Section
+        source_section = self._create_source_section()
+        top_row.addWidget(source_section, 1)
+
+        # PROCESSING Section
+        processing_section = self._create_processing_section()
+        top_row.addWidget(processing_section, 1)
+
+        layout.addLayout(top_row)
+
+        # Middle Row: PREVIEW + PROGRESS
+        middle_row = QHBoxLayout()
+        middle_row.setSpacing(20)
+
+        # PREVIEW Section
+        preview_section = self._create_preview_section()
+        middle_row.addWidget(preview_section, 3)
+
+        # PROGRESS Section
+        progress_section = self._create_progress_section()
+        middle_row.addWidget(progress_section, 2)
+
+        layout.addLayout(middle_row)
+
+        # Action Buttons
+        actions_section = self._create_action_buttons()
+        layout.addWidget(actions_section)
+
+        # OUTPUTS Section
+        outputs_section = self._create_outputs_section()
+        layout.addWidget(outputs_section)
+
+        # Activity log is now inside PROGRESS section
+
+        scroll.setWidget(content)
+        return scroll
+
+    def _create_source_section(self) -> QGroupBox:
+        """Create the SOURCE section with Image/Text tabs and file selection."""
+        group = QGroupBox("📁 SOURCE")
+        group.setObjectName("sectionCard")
+
+        layout = QVBoxLayout(group)
+        layout.setSpacing(16)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Tab Switcher
+        tab_layout = QHBoxLayout()
+        tab_layout.setSpacing(8)
+
+        self.image_tab = QPushButton("🖼️ Image")
+        self.image_tab.setCheckable(True)
+        self.image_tab.setChecked(True)
+        self.image_tab.setObjectName("tabButtonActive")
+
+        self.text_tab = QPushButton("🔤 Text")
+        self.text_tab.setCheckable(True)
+        self.text_tab.setObjectName("tabButtonInactive")
+
+        tab_layout.addWidget(self.image_tab)
+        tab_layout.addWidget(self.text_tab)
+        tab_layout.addStretch()
+
+        layout.addLayout(tab_layout)
+
+        # File Selection
+        file_layout = QHBoxLayout()
+        file_layout.setSpacing(8)
+
+        self.file_input = QLineEdit()
+        self.file_input.setPlaceholderText("Select image file...")
+        self.file_input.setObjectName("fileInput")
+        self.file_input.setReadOnly(True)
+        file_layout.addWidget(self.file_input, 1)
+
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.setObjectName("primaryButton")
+        self.browse_btn.setCursor(Qt.PointingHandCursor)
+        file_layout.addWidget(self.browse_btn)
+
+        layout.addLayout(file_layout)
+        layout.addStretch()
+
+        return group
+
+    def _create_processing_section(self) -> QGroupBox:
+        """Create the PROCESSING section with method selection and quality."""
+        group = QGroupBox("⚙️ PROCESSING")
+        group.setObjectName("sectionCard")
+
+        layout = QVBoxLayout(group)
+        layout.setSpacing(16)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Method Label
+        method_label = QLabel("Method")
+        method_label.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 600;")
+        layout.addWidget(method_label)
+
+        # Method Selection Cards
+        method_layout = QHBoxLayout()
+        method_layout.setSpacing(12)
+
+        # Local Processing Card
+        self.local_card = QFrame()
+        self.local_card.setObjectName("methodCardSelected")
+        self.local_card.setCursor(Qt.PointingHandCursor)
+        local_layout = QVBoxLayout(self.local_card)
+        local_layout.setSpacing(4)
+        local_layout.setContentsMargins(12, 12, 12, 12)
+
+        local_radio = QRadioButton("💻 Local Processing")
+        local_radio.setChecked(True)
+        local_radio.setStyleSheet("""
+            QRadioButton {
+                color: #e2e8f0;
+                font-weight: 600;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border: 2px solid #f97316;
+                background-color: transparent;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #f97316;
+                border: 2px solid #f97316;
+            }
+            QRadioButton::indicator:checked::after {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background-color: white;
+            }
+        """)
+        local_desc = QLabel("Geometry only")
+        local_desc.setStyleSheet("color: #94a3b8; font-size: 11px;")
+
+        local_layout.addWidget(local_radio)
+        local_layout.addWidget(local_desc)
+
+        # Cloud API Card
+        self.cloud_card = QFrame()
+        self.cloud_card.setObjectName("methodCard")
+        self.cloud_card.setCursor(Qt.PointingHandCursor)
+        cloud_layout = QVBoxLayout(self.cloud_card)
+        cloud_layout.setSpacing(4)
+        cloud_layout.setContentsMargins(12, 12, 12, 12)
+
+        cloud_radio = QRadioButton("☁️ Cloud API")
+        cloud_radio.setStyleSheet("""
+            QRadioButton {
+                color: #94a3b8;
+                font-weight: 600;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border: 2px solid #64748b;
+                background-color: transparent;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #f97316;
+                border: 2px solid #f97316;
+            }
+            QRadioButton::indicator:checked::after {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background-color: white;
+            }
+        """)
+        cloud_desc = QLabel("Geometry + Texture")
+        cloud_desc.setStyleSheet("color: #64748b; font-size: 11px;")
+
+        cloud_layout.addWidget(cloud_radio)
+        cloud_layout.addWidget(cloud_desc)
+
+        # Radio button group
+        self.method_group = QButtonGroup()
+        self.method_group.addButton(local_radio, 0)
+        self.method_group.addButton(cloud_radio, 1)
+
+        method_layout.addWidget(self.local_card, 1)
+        method_layout.addWidget(self.cloud_card, 1)
+
+        layout.addLayout(method_layout)
+
+        # Model Selection (for Cloud API)
+        model_label = QLabel("Model")
+        model_label.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 600;")
+        layout.addWidget(model_label)
+
+        # Model Dropdown - Available cloud models
+        self.model_combo = QComboBox()
+        self.model_combo.setObjectName("modelCombo")
+        # Models: (value, display_name) - Simple names for users
+        self.cloud_models = [
+            ("hitem3dv1.5", "Standard"),
+            ("hitem3dv2.0", "Enhanced"),
+            ("scene-portraitv1.5", "Portrait"),
+            ("scene-portraitv2.0", "Portrait Enhanced"),
+            ("scene-portraitv2.1", "Best Quality"),
+        ]
+        for model_id, model_name in self.cloud_models:
+            self.model_combo.addItem(model_name, model_id)
+        layout.addWidget(self.model_combo)
+
+        # Resolution Label
+        resolution_label = QLabel("Resolution")
+        resolution_label.setStyleSheet(
+            "color: #94a3b8; font-size: 13px; font-weight: 600;"
+        )
+        layout.addWidget(resolution_label)
+
+        # Resolution Dropdown - Updated based on model
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.setObjectName("resolutionCombo")
+        # Default resolutions
+        self.model_resolutions = {
+            "hitem3dv1.5": ["512", "1024", "1536", "1536pro"],
+            "hitem3dv2.0": ["1536", "1536pro"],
+            "scene-portraitv1.5": ["1536"],
+            "scene-portraitv2.0": ["1536pro"],
+            "scene-portraitv2.1": ["1536pro"],
+        }
+        # Set default resolutions for first model
+        for res in self.model_resolutions["hitem3dv1.5"]:
+            self.resolution_combo.addItem(res, res)
+        layout.addWidget(self.resolution_combo)
+
+        layout.addStretch()
+
+        return group
+
+    def _create_preview_section(self) -> QGroupBox:
+        """Create the PREVIEW section with image drop area."""
+        group = QGroupBox("🖼️ PREVIEW")
+        group.setObjectName("sectionCard")
+
+        layout = QVBoxLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Preview Area
+        self.preview_frame = QFrame()
+        self.preview_frame.setObjectName("previewFrame")
+        self.preview_frame.setMinimumHeight(250)
+        self.preview_frame.setAcceptDrops(True)
+
+        preview_layout = QVBoxLayout(self.preview_frame)
+        preview_layout.setAlignment(Qt.AlignCenter)
+
+        self.preview_label = QLabel("No image selected")
+        self.preview_label.setStyleSheet("color: #64748b; font-size: 14px;")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        preview_layout.addWidget(self.preview_label)
+
+        self.image_preview = QLabel()
+        self.image_preview.setAlignment(Qt.AlignCenter)
+        self.image_preview.setStyleSheet("background-color: transparent;")
+        self.image_preview.setMaximumSize(400, 300)
+        self.image_preview.setScaledContents(True)
+        self.image_preview.hide()
+        preview_layout.addWidget(self.image_preview)
+
+        layout.addWidget(self.preview_frame, 1)
+
+        return group
+
+    def _create_progress_section(self) -> QGroupBox:
+        """Create the PROGRESS section with progress bar, status, and activity log."""
+        group = QGroupBox("📊 PROGRESS & LOG")
+        group.setObjectName("sectionCard")
+
+        layout = QVBoxLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setObjectName("progressBar")
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setMinimumHeight(24)
+        layout.addWidget(self.progress_bar)
+
+        # Status with Stage Name
+        status_layout = QHBoxLayout()
+
+        self.status_icon = QLabel("⏳")
+        self.status_icon.setStyleSheet("font-size: 16px;")
+        status_layout.addWidget(self.status_icon)
+
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: #94a3b8; font-size: 13px;")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.status_label, 1)
+
+        layout.addLayout(status_layout)
+
+        # Time Labels
+        time_layout = QHBoxLayout()
+
+        self.elapsed_label = QLabel("Elapsed: 00:00")
+        self.elapsed_label.setStyleSheet("color: #64748b; font-size: 11px;")
+        time_layout.addWidget(self.elapsed_label)
+
+        time_layout.addStretch()
+
+        self.eta_label = QLabel("ETA: --:--")
+        self.eta_label.setStyleSheet("color: #64748b; font-size: 11px;")
+        time_layout.addWidget(self.eta_label)
+
+        layout.addLayout(time_layout)
+
+        # Activity Log (inside progress section)
+        self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("activityLog")
+        self.log_text.setReadOnly(True)
+        self.log_text.setPlaceholderText("Activity will appear here...")
+        self.log_text.setMinimumHeight(150)
+        layout.addWidget(self.log_text)
+
+        layout.addStretch()
+
+        return group
+
+    def _create_action_buttons(self) -> QWidget:
+        """Create the action buttons (Reset, Open Folder, Generate)."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignCenter)
+
+        # Reset Button
+        self.reset_btn = QPushButton("🔄 Reset")
+        self.reset_btn.setObjectName("secondaryButton")
+        self.reset_btn.setCursor(Qt.PointingHandCursor)
+        self.reset_btn.setMinimumWidth(120)
+        layout.addWidget(self.reset_btn)
+
+        # Open Folder Button
+        self.open_folder_btn = QPushButton("📂 Open Folder")
+        self.open_folder_btn.setObjectName("secondaryButton")
+        self.open_folder_btn.setCursor(Qt.PointingHandCursor)
+        self.open_folder_btn.setMinimumWidth(140)
+        layout.addWidget(self.open_folder_btn)
+
+        layout.addSpacing(40)
+
+        # Generate Button
+        self.generate_btn = QPushButton("🚀 Generate 3D Model")
+        self.generate_btn.setObjectName("generateButton")
+        self.generate_btn.setCursor(Qt.PointingHandCursor)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setMinimumWidth(200)
+        self.generate_btn.setMinimumHeight(44)
+        layout.addWidget(self.generate_btn)
+
+        return widget
+
+    def _create_outputs_section(self) -> QGroupBox:
+        """Create the OUTPUTS section with OBJ, STL, GLB cards."""
+        group = QGroupBox("📦 OUTPUTS")
+        group.setObjectName("sectionCard")
+
+        layout = QHBoxLayout(group)
+        layout.setSpacing(16)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        # OBJ Card
+        self.obj_card = self._create_output_card("OBJ")
+        layout.addWidget(self.obj_card)
+
+        # STL Card
+        self.stl_card = self._create_output_card("STL")
+        layout.addWidget(self.stl_card)
+
+        # GLB Card
+        self.glb_card = self._create_output_card("GLB")
+        layout.addWidget(self.glb_card)
+
+        return group
+
+    def _create_output_card(self, format_name: str) -> QFrame:
+        """Create an output card for a specific format."""
+        card = QFrame()
+        card.setObjectName("outputCard")
+
+        layout = QVBoxLayout(card)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # Format Title
+        title = QLabel(format_name)
+        title.setStyleSheet("color: #60a5fa; font-size: 16px; font-weight: bold;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        # Spacer
+        layout.addStretch()
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        open_btn = QPushButton("Open")
+        open_btn.setObjectName("smallPrimaryButton")
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.clicked.connect(lambda: self._on_open_output(format_name))
+        btn_layout.addWidget(open_btn)
+
+        save_btn = QPushButton("Save")
+        save_btn.setObjectName("smallSecondaryButton")
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(lambda: self._on_save_output(format_name))
+        btn_layout.addWidget(save_btn)
+
+        layout.addLayout(btn_layout)
+
+        # Store button references on the card for later access
+        card.open_btn = open_btn
+        card.save_btn = save_btn
+
+        # Initially disable buttons until first generation completes
+        open_btn.setEnabled(False)
+        save_btn.setEnabled(False)
+
+        return card
+
+    def _create_activity_log_section(self) -> QGroupBox:
+        """Create the ACTIVITY LOG section."""
+        group = QGroupBox("📋 ACTIVITY LOG")
+        group.setObjectName("sectionCard")
+
+        layout = QVBoxLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 20, 16, 16)
+
+        self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("activityLog")
+        self.log_text.setReadOnly(True)
+        self.log_text.setPlaceholderText("Activity will appear here...")
+        self.log_text.setMinimumHeight(120)
+        layout.addWidget(self.log_text)
+
+        return group
+
+    def _setup_connections(self):
+        """Setup signal connections."""
+        # Tab switching
+        self.image_tab.clicked.connect(lambda: self._switch_tab("image"))
+        self.text_tab.clicked.connect(lambda: self._switch_tab("text"))
+
+        # File selection
+        self.browse_btn.clicked.connect(self._on_browse)
+        self.preview_frame.dragEnterEvent = self._on_drag_enter
+        self.preview_frame.dropEvent = self._on_drop
+        self.preview_frame.mousePressEvent = lambda e: self._on_browse()
+
+        # Method selection
+        self.method_group.buttonClicked.connect(self._on_method_changed)
+        self.local_card.mousePressEvent = lambda e: self.method_group.button(
+            0
+        ).setChecked(True)
+        self.cloud_card.mousePressEvent = lambda e: self.method_group.button(
+            1
+        ).setChecked(True)
+
+        # Model selection - update resolutions when model changes
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+
+        # Action buttons
+        self.reset_btn.clicked.connect(self._on_reset)
+        self.open_folder_btn.clicked.connect(self._on_open_folder)
+        self.generate_btn.clicked.connect(self._on_generate)
+        self.logout_btn.clicked.connect(self._on_logout)
+        self.quit_btn.clicked.connect(self.close)
+
+    def _load_stylesheet(self):
+        """Load the application stylesheet."""
+        stylesheet = """
+        /* Global */
+        QWidget {
+            background-color: #0a0e1a;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-size: 13px;
+        }
+        
+        /* Sidebar */
+        #sidebar {
+            background-color: #0d1320;
+            border-right: 1px solid #1e3a5f;
+        }
+        
+        /* Content Area */
+        #contentArea {
+            background-color: #0a0e1a;
+        }
+        
+        #contentWidget {
+            background-color: #0a0e1a;
+        }
+        
+        /* Info Cards (DEVICE, SYSTEM) */
+        #infoCard {
+            background-color: #111827;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+            margin-top: 14px;
+            padding-top: 10px;
+            font-weight: bold;
+            color: #e2e8f0;
+        }
+        
+        #infoCard::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+            color: #60a5fa;
+        }
+        
+        /* Section Cards */
+        #sectionCard {
+            background-color: #111827;
+            border: 1px solid #1e3a5f;
+            border-radius: 10px;
+            margin-top: 14px;
+            padding-top: 10px;
+            font-weight: bold;
+            color: #e2e8f0;
+        }
+        
+        #sectionCard::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+            color: #60a5fa;
+        }
+        
+        /* Tab Buttons */
+        #tabButtonActive {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        #tabButtonActive:hover {
+            background-color: #2563eb;
+        }
+        
+        #tabButtonInactive {
+            background-color: #1a2332;
+            color: #94a3b8;
+            border: 1px solid #1e3a5f;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        #tabButtonInactive:hover {
+            background-color: #162032;
+            color: #e2e8f0;
+        }
+        
+        /* File Input */
+        #fileInput {
+            background-color: #1a2332;
+            color: #e2e8f0;
+            border: 1px solid #1e3a5f;
+            border-radius: 6px;
+            padding: 10px 14px;
+        }
+        
+        #fileInput:focus {
+            border-color: #3b82f6;
+        }
+        
+        /* Method Cards */
+        #methodCard {
+            background-color: #0d1320;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+        }
+        
+        #methodCard:hover {
+            border-color: #2d4a6f;
+        }
+        
+        #methodCardSelected {
+            background-color: rgba(59, 130, 246, 0.1);
+            border: 2px solid #3b82f6;
+            border-radius: 8px;
+        }
+        
+        /* Quality Combo */
+        #qualityCombo {
+            background-color: #1a2332;
+            color: #e2e8f0;
+            border: 1px solid #1e3a5f;
+            border-radius: 6px;
+            padding: 10px 14px;
+        }
+        
+        #qualityCombo::drop-down {
+            border: none;
+            width: 30px;
+        }
+        
+        #qualityCombo QAbstractItemView {
+            background-color: #1a2332;
+            color: #e2e8f0;
+            selection-background-color: #3b82f6;
+            border: 1px solid #1e3a5f;
+        }
+        
+        /* Preview Frame */
+        #previewFrame {
+            background-color: #151d2a;
+            border: 2px dashed #1e3a5f;
+            border-radius: 12px;
+        }
+        
+        #previewFrame:hover {
+            border-color: #2d4a6f;
+        }
+        
+        /* Progress Bar */
+        #progressBar {
+            background-color: #1a2332;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+        }
+        
+        #progressBar::chunk {
+            background-color: #3b82f6;
+            border-radius: 6px;
+        }
+        
+        /* Output Card */
+        #outputCard {
+            background-color: #1a2332;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+        }
+        
+        /* Activity Log */
+        #activityLog {
+            background-color: #0d1320;
+            color: #94a3b8;
+            border: 1px solid #1e3a5f;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+        }
+        
+        /* Buttons */
+        #primaryButton {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        #primaryButton:hover {
+            background-color: #2563eb;
+        }
+        
+        #primaryButton:disabled {
+            background-color: #1e3a5f;
+            color: #64748b;
+        }
+        
+        #secondaryButton {
+            background-color: #374151;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        #secondaryButton:hover {
+            background-color: #4b5563;
+        }
+        
+        #dangerButton {
+            background-color: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            font-weight: 600;
+        }
+        
+        #dangerButton:hover {
+            background-color: #dc2626;
+        }
+        
+        #generateButton {
+            background-color: #22c55e;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        #generateButton:hover {
+            background-color: #16a34a;
+        }
+        
+        #generateButton:disabled {
+            background-color: #1e3a5f;
+            color: #64748b;
+        }
+        
+        #smallPrimaryButton {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        #smallPrimaryButton:hover {
+            background-color: #2563eb;
+        }
+        
+        #smallSecondaryButton {
+            background-color: #374151;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        #smallSecondaryButton:hover {
+            background-color: #4b5563;
+        }
+        
+        /* Scroll Area */
+        #contentScroll {
+            background-color: transparent;
+            border: none;
+        }
+        
+        #contentScroll QScrollBar:vertical {
+            background-color: #0d1320;
+            width: 10px;
+            border-radius: 5px;
+        }
+        
+        #contentScroll QScrollBar::handle:vertical {
+            background-color: #1e3a5f;
+            border-radius: 5px;
+            min-height: 30px;
+        }
+        
+        #contentScroll QScrollBar::handle:vertical:hover {
+            background-color: #2d4a6f;
+        }
+        """
+        self.setStyleSheet(stylesheet)
+
+    def _switch_tab(self, tab: str):
+        """Switch between Image and Text tabs."""
+        if tab == "image":
+            self.image_tab.setObjectName("tabButtonActive")
+            self.image_tab.setChecked(True)
+            self.text_tab.setObjectName("tabButtonInactive")
+            self.text_tab.setChecked(False)
+        else:
+            self.text_tab.setObjectName("tabButtonActive")
+            self.text_tab.setChecked(True)
+            self.image_tab.setObjectName("tabButtonInactive")
+            self.image_tab.setChecked(False)
+        self._load_stylesheet()
+
+    def _on_method_changed(self, button):
+        """Handle method selection change."""
+        if button == self.method_group.button(0):
+            self.local_card.setObjectName("methodCardSelected")
+            self.cloud_card.setObjectName("methodCard")
+        else:
+            self.cloud_card.setObjectName("methodCardSelected")
+            self.local_card.setObjectName("methodCard")
+        self._load_stylesheet()
+
+    def _on_model_changed(self, index):
+        """Handle model selection change - update available resolutions."""
+        model_id = self.model_combo.currentData()  # Get the model ID
+        resolutions = self.model_resolutions.get(model_id, ["1024", "1536", "1536pro"])
+
+        # Save current selection if still available
+        current_res = self.resolution_combo.currentData()
+
+        # Update resolutions
+        self.resolution_combo.blockSignals(True)
+        self.resolution_combo.clear()
+        for res in resolutions:
+            self.resolution_combo.addItem(res, res)
+
+        # Try to restore previous selection or default to highest
+        if current_res in resolutions:
+            self.resolution_combo.setCurrentText(current_res)
+        else:
+            self.resolution_combo.setCurrentIndex(len(resolutions) - 1)  # Highest res
+        self.resolution_combo.blockSignals(False)
+
+    def _on_drag_enter(self, event: QDragEnterEvent):
+        """Handle drag enter event."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def _on_drop(self, event: QDropEvent):
+        """Handle drop event."""
+        urls = event.mimeData().urls()
+        if urls:
+            file_path = urls[0].toLocalFile()
+            if file_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+                self._load_image(file_path)
+
+    def _on_browse(self):
+        """Handle browse button click."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
+        )
+        if file_path:
+            self._load_image(file_path)
+
+    def _load_image(self, file_path: str):
+        """Load an image file."""
+        self.selected_file = file_path
+
+        pixmap = QPixmap(file_path)
+        if not pixmap.isNull():
+            self.preview_label.hide()
+            self.image_preview.setPixmap(
+                pixmap.scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+            self.image_preview.show()
+
+        self.file_input.setText(Path(file_path).name)
+        self.generate_btn.setEnabled(True)
+        self._add_log(f"Image loaded: {Path(file_path).name}")
+
+    def _on_reset(self):
+        """Handle reset button click."""
+        self.selected_file = None
+        self.file_input.clear()
+        self.image_preview.clear()
+        self.image_preview.hide()
+        self.preview_label.show()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Ready")
+        self.status_icon.setText("⏳")
+        self.elapsed_label.setText("Elapsed: --:--")
+        self.eta_label.setText("ETA: --:--")
+        self.generate_btn.setEnabled(False)
+        self._add_log("🔄 Reset")
+
+    def _on_open_folder(self):
+        """Handle open folder button click."""
+        import subprocess
+
+        if os.name == "nt":
+            subprocess.run(["explorer", str(self.output_dir)])
+        else:
+            subprocess.run(["xdg-open", str(self.output_dir)])
+        self._add_log(f"📂 Opened output folder: {self.output_dir}")
+
+    def _enforce_trial_settings(self):
+        """Force Cloud API + Best Model + Highest Resolution during trial period."""
+        from core.credit_manager import get_user_balance
+
+        user_id = self.session_manager.user_id
+        if not user_id:
+            return
+
+        balance_info = get_user_balance(
+            user_id, self.session_manager.device_fingerprint
+        )
+        if "error" in balance_info:
+            return
+
+        trial_used = balance_info.get("trial_used", 0)
+        credits = balance_info.get("credits_balance", 0)
+
+        # Force Cloud API + Best Model + Highest Resolution during trial
+        if trial_used == 0 and credits == 0:
+            # User is in trial period - force cloud API and best model
+            self.method_group.button(1).setChecked(True)  # Cloud API
+
+            # Set to Best Quality (best model)
+            self.model_combo.setCurrentText("Best Quality")
+
+            # Set to highest resolution (1536pro)
+            self.resolution_combo.setCurrentText("1536pro")
+
+            # Disable switching during trial
+            self.method_group.setExclusive(False)
+            self.method_group.button(0).setEnabled(False)  # Disable Local
+            self.method_group.setExclusive(True)
+            self.model_combo.setEnabled(False)
+            self.resolution_combo.setEnabled(False)
+            self._add_log("🎯 Trial: Cloud API + Best Quality + 1536pro enforced")
+
+    def _refresh_credit_balance(self):
+        """Refresh the credit balance display."""
+        from core.credit_manager import get_user_balance
+
+        user_id = self.session_manager.user_id
+        if not user_id:
+            self.trial_value.setText("-")
+            self.credits_value.setText("-")
+            self.used_value.setText("-")
+            return
+
+        # Check if session is authenticated
+        if not self.session_manager.is_authenticated:
+            self.trial_value.setText("-")
+            self.credits_value.setText("-")
+            self.used_value.setText("-")
+            return
+
+        balance_info = get_user_balance(
+            user_id, self.session_manager.device_fingerprint
+        )
+
+        if "error" in balance_info:
+            self.trial_value.setText("Error")
+            self.credits_value.setText("Error")
+            self.used_value.setText("Error")
+            return
+
+        # Update display
+        trial = balance_info.get("trial_remaining", 0)
+        trial_used = balance_info.get("trial_used", 0)
+        credits = balance_info.get("credits_balance", 0)
+        used = balance_info.get("total_used", 0)
+
+        self.trial_value.setText(f"{trial}")
+
+        # Force Cloud API + Best Model + Highest Resolution during trial period
+        if trial_used == 0 and credits == 0:
+            # User is in trial period - force cloud API and best model
+            self.method_group.button(1).setChecked(True)  # Cloud API
+            self.model_combo.setCurrentText("HItem3D Portrait v2.1 (Best)")
+            self.resolution_combo.setCurrentText("1536pro")
+            # Disable switching during trial
+            self.method_group.setExclusive(False)
+            self.method_group.button(0).setEnabled(False)  # Disable Local
+            self.method_group.setExclusive(True)
+            self.model_combo.setEnabled(False)
+            self.resolution_combo.setEnabled(False)
+        else:
+            # Not in trial - enable all options
+            self.method_group.button(0).setEnabled(True)
+            self.model_combo.setEnabled(True)
+            self.resolution_combo.setEnabled(True)
+        if credits > 0:
+            self.credits_value.setText(f"{credits}")
+            self.credits_value.setStyleSheet(
+                "color: #4ade80; font-size: 14px; font-weight: 600;"
+            )
+        else:
+            self.credits_value.setText(f"{credits}")
+            self.credits_value.setStyleSheet(
+                "color: #f87171; font-size: 14px; font-weight: 600;"
+            )
+        self.used_value.setText(f"{used}")
+
+    def _on_buy_credits(self):
+        """Open credit purchase dialog."""
+        from ui.credit_purchase_dialog import CreditPurchaseDialog
+
+        # Get current balance
+        user_id = self.session_manager.user_id
+        if not user_id:
+            QMessageBox.warning(
+                self, "Not Logged In", "Please login first to purchase credits."
+            )
+            return
+
+        # Show credit purchase dialog
+        dialog = CreditPurchaseDialog(self, self.session_manager.credits)
+        dialog.exec()
+
+    def _check_credit_update(self):
+        """Poll Supabase for credit balance updates after purchase."""
+        self._poll_count += 1
+        try:
+            balance_info = get_user_balance(
+                self.session_manager.user_id, self.session_manager.device_fingerprint
+            )
+            new_balance = balance_info.get("credits_balance", 0)
+            if new_balance > self._poll_initial_balance:
+                self._credit_poll_timer.stop()
+                added = new_balance - self._poll_initial_balance
+                self._refresh_credit_balance()
+                QMessageBox.information(
+                    self,
+                    "Purchase Complete",
+                    f"✅ Credits added: {added}\nNew balance: {new_balance}",
+                )
+                self._add_log(
+                    f"💰 Credits purchased: +{added} (balance: {new_balance})"
+                )
+                return
+        except Exception:
+            pass
+
+        if self._poll_count > 60:  # 5 minute timeout
+            self._credit_poll_timer.stop()
+            self._add_log(
+                "⏰ Credit polling timed out. Click Refresh to check manually."
+            )
+
+    def _on_generate(self):
+        """Handle generate button click."""
+        if not self.selected_file:
+            QMessageBox.warning(self, "Warning", "Please select an image first.")
+            return
+
+        # Get settings
+        model = "local" if self.method_group.checkedId() == 0 else "cloud"
+
+        # Get model and resolution from combos
+        api_model = self.model_combo.currentData()  # e.g., "hitem3dv1.5"
+        api_resolution = self.resolution_combo.currentData()  # e.g., "1536pro"
+
+        # Local processing is FREE - no credits needed
+        if model == "local":
+            self._start_local_generation("standard")  # Quality doesn't matter for local
+            return
+
+        # TRIAL: First generation uses cloud API with highest resolution by default
+        # Check if user has used trial already
+        from core.credit_manager import get_user_balance
+
+        balance_info = get_user_balance(
+            self.session_manager.user_id, self.session_manager.device_fingerprint
+        )
+        trial_used = balance_info.get("trial_used", 0)
+
+        is_trial = trial_used == 0  # First generation is trial
+
+        # For trial, force best model (portrait v2.1) and highest resolution
+        if is_trial:
+            api_model = "scene-portraitv2.1"
+            api_resolution = "1536pro"
+            # Update UI to reflect trial selection
+            self.model_combo.setCurrentText("HItem3D Portrait v2.1 (Best)")
+            self._add_log(
+                "🎯 Trial: Using Best Quality with 1536pro resolution - FREE first generation!"
+            )
+
+        # Check credits BEFORE generation
+        allowed, reason, cost = can_generate(
+            self.session_manager.user_id,
+            api_resolution,
+            is_trial,
+            device_fingerprint=self.session_manager.device_fingerprint,
+        )
+        if not allowed:
+            reply = QMessageBox.question(
+                self,
+                "Insufficient Credits",
+                f"{reason}\n\nWould you like to buy more credits?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self._on_buy_credits()
+            return
+
+        # Use the selected model
+        model_id = api_model
+
+        # Deduct credits BEFORE starting generation
+        deduction = deduct_credits(
+            self.session_manager.user_id,
+            api_resolution,
+            model_id,
+            input_type="image",
+            output_format="glb",
+            is_trial=is_trial,
+            device_fingerprint=self.session_manager.device_fingerprint,
+        )
+
+        if not deduction.get("success"):
+            QMessageBox.warning(
+                self,
+                "Credit Error",
+                f"Could not deduct credits: {deduction.get('error', 'Unknown error')}",
+            )
+            return
+
+        # Store generation parameters
+        self._current_model = model
+        self._current_quality = api_resolution
+        self._current_api_model = api_model
+        self._current_generation_id = deduction.get("generation_id")
+        self._current_credits_deducted = deduction.get("credits_deducted", 0)
+        self._is_trial_generation = is_trial  # Track if this is trial generation
+
+        source = deduction.get("source", "credits")
+        if source == "trial_free":
+            self._add_log("💰 First generation (trial) - FREE!")
+        else:
+            self._add_log(
+                f"💰 Credits deducted: {self._current_credits_deducted} (source: {source})"
+            )
+
+        # Start generation
+        self.generate_btn.setEnabled(False)
+
+        # Disable Open/Save buttons during generation
+        self.obj_card.open_btn.setEnabled(False)
+        self.obj_card.save_btn.setEnabled(False)
+        self.stl_card.open_btn.setEnabled(False)
+        self.stl_card.save_btn.setEnabled(False)
+        self.glb_card.open_btn.setEnabled(False)
+        self.glb_card.save_btn.setEnabled(False)
+
+        self.status_label.setText("Initializing...")
+        self.status_icon.setText("⏳")
+        self.progress_bar.setValue(0)
+
+        self.start_time = datetime.now()
+        self.timer.start(1000)
+
+        # Ensure selected_file is not None (it's checked above)
+        self.worker = GenerationWorker(
+            str(self.selected_file),  # Convert to string explicitly
+            model,  # "local" or "cloud"
+            api_resolution,  # Resolution
+            api_model,  # Model ID for cloud
+            ["obj", "stl", "glb"],
+        )
+        self.worker.progress.connect(self._on_progress)
+        self.worker.status.connect(self._on_status)
+        self.worker.finished.connect(self._on_generation_complete)
+        self.worker.error.connect(self._on_generation_error)
+        self.worker.start()
+
+        self._add_log(
+            f"🚀 Starting 3D generation with {api_model} at {api_resolution}: {Path(self.selected_file).name}"
+        )
+
+    def _start_local_generation(self, quality: str):
+        """Start local processing (FREE - no credits needed)."""
+
+        # Check if user wants to see the CPU warning modal
+        settings = QSettings("TrivoxModels", "ImageTo3DPro")
+        dont_show_again = settings.value("dont_show_cpu_warning", False, type=bool)
+
+        if not dont_show_again:
+            # Show CPU warning modal
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Local Processing Notice")
+            msg.setIcon(QMessageBox.Information)
+            msg.setText(
+                "<b>ℹ️ You're using Local Processing (CPU)</b><br><br>"
+                "This mode runs on your computer's processor, which is slower than GPU.<br><br>"
+                "<b>💡 For better results:</b><br>"
+                "• Use a computer with a powerful GPU for faster processing<br>"
+                "• Or use our <b>Cloud API</b> for:<br>"
+                "  - High-quality 3D models<br>"
+                "  - Faster processing (seconds vs minutes)<br>"
+                "  - Professional GPU rendering<br><br>"
+                "Local processing is <b>FREE</b>, while Cloud API uses credits."
+            )
+
+            # Add checkbox for "don't show again"
+            dont_show_checkbox = QCheckBox("Don't show this message again")
+            msg.setCheckBox(dont_show_checkbox)
+
+            # Add buttons
+            msg.addButton("Continue (Local)", QMessageBox.AcceptRole)
+            msg.addButton("Use Cloud API", QMessageBox.ActionRole)
+            msg.setDefaultButton(QMessageBox.Ok)
+
+            # Show modal
+            clicked_button = msg.exec_()
+
+            # Check if user wants to stop showing this
+            if dont_show_checkbox.isChecked():
+                settings.setValue("dont_show_cpu_warning", True)
+
+            # If user clicked "Use Cloud API", switch to cloud mode
+            if clicked_button == 1:  # Use Cloud API button
+                self.method_group.button(1).setChecked(True)  # Switch to Cloud
+                self._on_generate()  # Start cloud generation instead
+                return
+
+        self._add_log("🚀 Starting LOCAL 3D generation (FREE - no credits required)")
+
+        # Disable Open/Save buttons during generation
+        self.obj_card.open_btn.setEnabled(False)
+        self.obj_card.save_btn.setEnabled(False)
+        self.stl_card.open_btn.setEnabled(False)
+        self.stl_card.save_btn.setEnabled(False)
+        self.glb_card.open_btn.setEnabled(False)
+        self.glb_card.save_btn.setEnabled(False)
+
+        # Start generation
+        self.generate_btn.setEnabled(False)
+        self.status_label.setText("Initializing local processing...")
+        self.status_icon.setText("⏳")
+        self.progress_bar.setValue(0)
+
+        self.start_time = datetime.now()
+        self.timer.start(1000)
+
+        # Store generation parameters
+        self._current_model = "local"
+        self._current_quality = "standard"
+        self._current_api_model = "local"
+        self._current_generation_id = None  # No generation ID for local
+        self._current_credits_deducted = 0
+
+        # Ensure selected_file is not None
+        self.worker = GenerationWorker(
+            str(self.selected_file),
+            "local",
+            "1024",  # Resolution doesn't matter for local
+            "local",  # api_model doesn't matter for local
+            ["obj", "stl", "glb"],
+            quality,
+        )
+        self.worker.progress.connect(self._on_progress)
+        self.worker.status.connect(self._on_status)
+        self.worker.finished.connect(self._on_generation_complete)
+        self.worker.error.connect(self._on_generation_error)
+        self.worker.start()
+
+        self._add_log(
+            f"🚀 Starting local 3D generation: {Path(self.selected_file).name}"
+        )
+
+    def _on_progress(self, value: int):
+        """Handle progress update."""
+        # Clamp value between 0-100
+        value = max(0, min(100, value))
+        self.progress_bar.setValue(value)
+
+    def _on_status(self, status: str):
+        """Handle status update with progress mapping."""
+        # Map status messages to progress stages
+        status_lower = status.lower()
+
+        # Update progress bar based on stage
+        if "initializing" in status_lower:
+            self.progress_bar.setValue(5)
+        elif "processing image" in status_lower:
+            self.progress_bar.setValue(10)
+        elif "submit" in status_lower:
+            self.progress_bar.setValue(15)
+        elif "processing on cloud" in status_lower or "waiting" in status_lower:
+            # Extract time from status if available
+            self.progress_bar.setValue(40)
+        elif "generating" in status_lower or "model" in status_lower:
+            self.progress_bar.setValue(70)
+        elif "preparing download" in status_lower:
+            self.progress_bar.setValue(85)
+        elif "downloading" in status_lower:
+            self.progress_bar.setValue(95)
+        elif "converting" in status_lower:
+            self.progress_bar.setValue(98)
+        elif "complete" in status_lower:
+            self.progress_bar.setValue(100)
+
+        self.status_label.setText(status)
+        self._add_log(f"📊 {status}")
+
+    def _on_generation_complete(self, result: dict):
+        """Handle generation completion."""
+        self.timer.stop()
+        self.generate_btn.setEnabled(True)
+
+        # Enable Open/Save buttons for available formats
+        if result.get("obj"):
+            self.obj_card.open_btn.setEnabled(True)
+            self.obj_card.save_btn.setEnabled(True)
+        if result.get("stl"):
+            self.stl_card.open_btn.setEnabled(True)
+            self.stl_card.save_btn.setEnabled(True)
+        if result.get("glb"):
+            self.glb_card.open_btn.setEnabled(True)
+            self.glb_card.save_btn.setEnabled(True)
+
+        self.status_label.setText("Complete!")
+        self.status_icon.setText("✅")
+        self.progress_bar.setValue(100)
+
+        # Mark generation as successful in Supabase
+        gen_id = getattr(self, "_current_generation_id", None)
+        if gen_id and self.start_time:
+            elapsed_ms = int((datetime.now() - self.start_time).total_seconds() * 1000)
+            try:
+                mark_generation_complete(gen_id, success=True, time_ms=elapsed_ms)
+            except Exception as e:
+                print(f"[MainWindow] Failed to mark generation complete: {e}")
+
+        # Refresh credit balance (delayed to ensure DB is updated)
+        QTimer.singleShot(500, self._refresh_credit_balance)
+
+        # Log outputs
+        outputs = []
+        for fmt in ["obj", "stl", "glb"]:
+            if result.get(fmt):
+                outputs.append(fmt.upper())
+
+        self._add_log("✅ 3D model generation complete!")
+        if outputs:
+            self._add_log(f"📦 Outputs: {', '.join(outputs)}")
+
+        # Save model info to Supabase (paths stored, not actual files)
+        gen_id = getattr(self, "_current_generation_id", None)
+        if gen_id and result:
+            try:
+                from core.model_storage import save_model_info_to_supabase
+
+                # Collect model files
+                model_files = {}
+                for fmt in ["obj", "stl", "glb"]:
+                    if result.get(fmt):
+                        model_files[fmt] = result[fmt]
+
+                if model_files:
+                    input_name = (
+                        Path(self.selected_file).name
+                        if self.selected_file
+                        else "unknown"
+                    )
+                    processing_method = getattr(self, "_current_model", "cloud_api")
+
+                    save_result = save_model_info_to_supabase(
+                        user_id=str(self.session_manager.user_id),
+                        generation_id=gen_id,
+                        model_files=model_files,
+                        input_filename=input_name,
+                        processing_method=processing_method,
+                    )
+
+                    if save_result.get("success"):
+                        self._add_log("📋 Model info saved to database")
+                    else:
+                        self._add_log(
+                            f"⚠️ DB save failed: {save_result.get('error', 'Unknown')}"
+                        )
+            except Exception as e:
+                self._add_log(f"⚠️ Storage error: {e}")
+
+        # Store result paths for Open/Save buttons
+        self._last_result = result
+
+        # After first generation (trial), prompt to buy credits
+        is_trial = getattr(self, "_is_trial_generation", False)
+        if is_trial:
+            self._add_log(
+                "🎉 Your first generation is FREE! Buy credits for more generations."
+            )
+            reply = QMessageBox.question(
+                self,
+                "First Generation Complete!",
+                "🎉 Your first 3D model generation is FREE!\n\n"
+                "Would you like to buy credits for more generations?\n\n"
+                "Credit packs available:\n"
+                "• Micro: 40 credits - ₹99\n"
+                "• Small: 100 credits - ₹199\n"
+                "• Medium: 500 credits - ₹799\n"
+                "• Large: 2000 credits - ₹2499",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self._on_buy_credits()
+            self._is_trial_generation = False  # Reset flag
+            # Refresh after trial prompt
+            QTimer.singleShot(300, self._refresh_credit_balance)
+
+    def _on_generation_error(self, error: str):
+        """Handle generation error."""
+        self.timer.stop()
+        self.generate_btn.setEnabled(True)
+
+        # Enable buttons on error (for next retry)
+        self.obj_card.open_btn.setEnabled(True)
+        self.obj_card.save_btn.setEnabled(True)
+        self.stl_card.open_btn.setEnabled(True)
+        self.stl_card.save_btn.setEnabled(True)
+        self.glb_card.open_btn.setEnabled(True)
+        self.glb_card.save_btn.setEnabled(True)
+
+        self.status_label.setText(f"Error: {error}")
+        self.status_icon.setText("❌")
+        self._add_log(f"❌ Error: {error}")
+
+        # Mark generation as failed — credits are refunded
+        gen_id = getattr(self, "_current_generation_id", None)
+        if gen_id:
+            try:
+                mark_generation_complete(gen_id, success=False, error=error)
+                self._add_log("💰 Credits refunded due to failed generation")
+                self._refresh_credit_balance()
+            except Exception as e:
+                print(f"[MainWindow] Failed to mark generation failed: {e}")
+
+    def _update_timer(self):
+        """Update elapsed time and ETA."""
+        if self.start_time and hasattr(self, "progress_bar"):
+            elapsed = datetime.now() - self.start_time
+            elapsed_seconds = int(elapsed.total_seconds())
+            minutes, seconds = divmod(elapsed_seconds, 60)
+            self.elapsed_label.setText(f"Elapsed: {minutes:02d}:{seconds:02d}")
+
+            # Calculate ETA based on current progress
+            current_value = self.progress_bar.value()
+            if current_value > 5 and current_value < 100:
+                # Estimate total time based on current progress
+                estimated_total = (elapsed_seconds * 100) / current_value
+                remaining = estimated_total - elapsed_seconds
+                if remaining > 0:
+                    eta_min, eta_sec = divmod(int(remaining), 60)
+                    self.eta_label.setText(f"ETA: {eta_min:02d}:{eta_sec:02d}")
+                else:
+                    self.eta_label.setText("ETA: 00:00")
+            elif current_value >= 100:
+                self.eta_label.setText("ETA: 00:00")
+
+    def _on_open_output(self, format_name: str):
+        """Handle open output button click."""
+        if not hasattr(self, "_last_result") or not self._last_result:
+            QMessageBox.warning(self, "No Output", "No generated model available.")
+            return
+
+        format_key = format_name.lower()
+        file_path = self._last_result.get(format_key)
+
+        if not file_path or not Path(file_path).exists():
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"{format_name.upper()} file not found. Please generate a model first.",
+            )
+            return
+
+        try:
+            import platform
+
+            if platform.system() == "Windows":
+                os.startfile(file_path)
+            else:
+                subprocess.run(["open", file_path])
+            self._add_log(f"📂 Opened {format_name.upper()}: {Path(file_path).name}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open file: {e}")
+
+    def _on_save_output(self, format_name: str):
+        """Handle save output button click."""
+        if not hasattr(self, "_last_result") or not self._last_result:
+            QMessageBox.warning(self, "No Output", "No generated model available.")
+            return
+
+        format_key = format_name.lower()
+        source_path = self._last_result.get(format_key)
+
+        if not source_path or not Path(source_path).exists():
+            QMessageBox.warning(
+                self,
+                "File Not Found",
+                f"{format_name.upper()} file not found. Please generate a model first.",
+            )
+            return
+
+        default_name = Path(source_path).name
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Save {format_name.upper()}",
+            default_name,
+            f"{format_name.upper()} Files (*.{format_name.lower()});;All Files (*)",
+        )
+
+        if file_path:
+            try:
+                import shutil
+
+                shutil.copy2(source_path, file_path)
+                self._add_log(f"💾 Saved {format_name.upper()}: {Path(file_path).name}")
+                QMessageBox.information(
+                    self, "Saved", f"File saved successfully to:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Could not save file: {e}")
+
+    def _on_logout(self):
+        """Handle logout button click."""
+        reply = QMessageBox.question(
+            self,
+            "Logout",
+            "Are you sure you want to logout?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            self.session_manager.logout()
+            self.close()
+            # Re-show auth dialog
+            from ui.auth_dialog import AuthDialog
+
+            auth_dialog = AuthDialog(self.session_manager)
+            if auth_dialog.exec() == AuthDialog.Accepted:
+                self.show()
+
+    def _add_log(self, message: str):
+        """Add an entry to the activity log."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.appendPlainText(f"[{timestamp}] {message}")
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(2000)
+        event.accept()

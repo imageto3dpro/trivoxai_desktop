@@ -1,0 +1,64 @@
+# TrivoxModels Desktop Application Dependencies
+# ==========================================
+# Complete requirements for desktop app build
+
+# Qt Framework for Desktop UI
+PySide6>=6.5.0
+
+# Image Processing
+Pillow>=10.0.0
+numpy>=1.24.0,<2.0
+opencv-python-headless>=4.8.0,<4.10
+
+# 3D Model Processing
+trimesh>=4.0.0
+open3d>=0.17.0
+xatlas>=0.0.9
+PyMCubes>=0.1.6
+
+# AI/ML Libraries for local processing
+torch>=2.0.0
+torchvision>=0.15.0
+diffusers>=0.21.0
+accelerate>=0.24.0
+transformers>=4.35.0
+rembg>=2.0.0
+  onnxruntime>=1.16.0
+  einops>=0.8.0
+  huggingface_hub>=0.20.0
+  omegaconf>=2.3.0
+  moderngl>=5.8.0
+
+# System Utilities
+psutil>=5.9.0
+
+# Auth
+bcrypt>=4.0.0
+
+# HTTP Clients
+requests>=2.31.0
+httpx>=0.25.0
+aiohttp>=3.8.0
+aiofiles>=23.0.0
+
+# Date/Time
+python-dateutil>=2.8.0
+
+# Supabase Client (for server-side auth)
+supabase>=2.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Tripo3D API Client (Official Python SDK)
+tripo3d>=0.3.10
+
+# Async support
+anyio>=3.7.0
+sniffio>=1.3.0
+
+# Build tool
+pyinstaller>=6.0.0
+
+# Payment Gateway
+razorpay>=1.4.0
