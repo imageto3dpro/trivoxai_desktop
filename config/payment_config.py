@@ -26,7 +26,17 @@ class PaymentProvider(str, Enum):
 # ═══════════════════════════════════════════════════════════════
 # 🔧 SWITCH PAYMENT PROVIDER HERE
 # ═══════════════════════════════════════════════════════════════
-PAYMENT_PROVIDER = PaymentProvider.GUMROAD  # Change this to switch providers
+try:
+    from core.payment_config_sync import get_payment_config_sync
+    sync = get_payment_config_sync()
+    active = sync.get_active_provider()
+    # Ensure the returned active provider is cast/mapped to the PaymentProvider enum
+    if isinstance(active, str):
+        PAYMENT_PROVIDER = PaymentProvider(active.lower())
+    else:
+        PAYMENT_PROVIDER = active
+except Exception:
+    PAYMENT_PROVIDER = PaymentProvider.GUMROAD  # Fallback
 
 # Options:
 # - PaymentProvider.GUMROAD      # No registration, 10% fee, fastest setup

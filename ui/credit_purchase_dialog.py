@@ -24,6 +24,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QPixmap
 
 from core.credit_manager import CREDIT_PACKS
+from core.payment_config_sync import get_credit_packs
 from core.payment_handler import get_payment_handler, PaymentHandler
 
 
@@ -108,8 +109,9 @@ class CreditPurchaseDialog(QDialog):
 
         # Add credit packs
         active_gateway = self._get_active_gateway()
+        active_packs = get_credit_packs() or CREDIT_PACKS
 
-        for pack_id, pack_info in CREDIT_PACKS.items():
+        for pack_id, pack_info in active_packs.items():
             # Check if pack has ID for the active gateway
             gateway_key = f"{active_gateway}_id"
             if pack_info.get(gateway_key) or pack_info.get(
@@ -120,7 +122,7 @@ class CreditPurchaseDialog(QDialog):
 
         # Add empty state if no packs
         has_packs = False
-        for pack in CREDIT_PACKS.values():
+        for pack in active_packs.values():
             if pack.get(f"{active_gateway}_id") or pack.get("gumroad_id"):
                 has_packs = True
                 break
@@ -246,15 +248,15 @@ class CreditPurchaseDialog(QDialog):
     def _get_active_gateway(self) -> str:
         """Get the current active payment gateway."""
         try:
-            from core.admin_manager import PaymentGatewayManager
-
-            return PaymentGatewayManager().get_active_gateway()
+            from core.payment_config_sync import get_payment_config_sync
+            return get_payment_config_sync().get_active_provider()
         except Exception:
             return "gumroad"
 
     def _purchase_pack(self, pack_id: str, active_gateway: str):
         """Handle purchase of a credit pack using the active gateway."""
-        pack_info = CREDIT_PACKS.get(pack_id)
+        active_packs = get_credit_packs() or CREDIT_PACKS
+        pack_info = active_packs.get(pack_id)
         if not pack_info:
             QMessageBox.warning(self, "Error", "This credit pack is not available.")
             return

@@ -27,7 +27,7 @@ from core.supabase_client import get_supabase
 logger = get_logger(__name__)
 
 # Configuration
-WEB_API_BASE_URL = os.getenv("WEB_API_URL", "https://your-domain.com/api/v1")
+WEB_API_BASE_URL = os.getenv("WEB_API_URL", "https://imageto3dpro-4f1j.onrender.com/api/v1")
 CACHE_FILE_PATH = Path.home() / ".trivoxmodels" / "payment_config_cache.json"
 CACHE_TTL_MINUTES = 5
 
@@ -110,7 +110,7 @@ class PaymentConfigSync:
             }
 
             logger.info(f"Syncing payment config from {url}")
-            response = requests.get(url, params=params, timeout=15)
+            response = requests.get(url, params=params, timeout=5)
 
             if response.status_code == 200:
                 data = response.json()
@@ -157,20 +157,20 @@ class PaymentConfigSync:
 
         except requests.exceptions.Timeout:
             logger.warning("Payment config sync timeout - using cache if available")
-            if self._config:
-                return True
+            if not self._config:
+                self._config = PaymentConfig(last_sync=datetime.now())
             return False
 
         except requests.exceptions.ConnectionError:
             logger.warning("Cannot connect to web API - using cache if available")
-            if self._config:
-                return True
+            if not self._config:
+                self._config = PaymentConfig(last_sync=datetime.now())
             return False
 
         except Exception as e:
             logger.error(f"Error syncing payment config: {e}")
-            if self._config:
-                return True
+            if not self._config:
+                self._config = PaymentConfig(last_sync=datetime.now())
             return False
 
     def _is_cache_valid(self) -> bool:

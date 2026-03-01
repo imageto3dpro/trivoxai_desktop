@@ -414,7 +414,8 @@ def get_razorpay_client() -> RazorpayClient:
 
 def is_razorpay_active() -> bool:
     """Check if Razorpay is the active payment provider."""
-    return PAYMENT_PROVIDER == PaymentProvider.RAZORPAY
+    from core.payment_config_sync import get_active_payment_provider
+    return get_active_payment_provider() == "razorpay"
 
 
 def validate_razorpay_config() -> Tuple[bool, str]:

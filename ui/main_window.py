@@ -658,37 +658,121 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(method_layout)
 
-        # Model Selection (for Cloud API)
+        # ── Cloud API Options Container (shown/hidden based on method) ──
+        self.cloud_options_widget = QWidget()
+        cloud_opts_layout = QVBoxLayout(self.cloud_options_widget)
+        cloud_opts_layout.setSpacing(12)
+        cloud_opts_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ── Row 1: Credit Balance + Cost Preview ──
+        credit_row = QHBoxLayout()
+        credit_row.setSpacing(12)
+
+        # Credit Balance Box
+        credit_box = QFrame()
+        credit_box.setStyleSheet("""
+            QFrame {
+                background-color: rgba(21, 128, 61, 0.15);
+                border-left: 3px solid #22c55e;
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+        """)
+        credit_box_layout = QVBoxLayout(credit_box)
+        credit_box_layout.setSpacing(4)
+        credit_box_layout.setContentsMargins(10, 8, 10, 8)
+
+        credit_header_layout = QHBoxLayout()
+        credit_header_label = QLabel("💰 Your Credits")
+        credit_header_label.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600; background: transparent;")
+        credit_header_layout.addWidget(credit_header_label)
+        credit_header_layout.addStretch()
+
+        self.cloud_buy_btn = QPushButton("Buy Credits")
+        self.cloud_buy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+        """)
+        self.cloud_buy_btn.setCursor(Qt.PointingHandCursor)
+        self.cloud_buy_btn.clicked.connect(self._on_buy_credits)
+        credit_header_layout.addWidget(self.cloud_buy_btn)
+        credit_box_layout.addLayout(credit_header_layout)
+
+        self.cloud_credit_value = QLabel("Loading...")
+        self.cloud_credit_value.setStyleSheet("color: #a7f3d0; font-size: 16px; font-weight: 700; background: transparent;")
+        credit_box_layout.addWidget(self.cloud_credit_value)
+
+        credit_row.addWidget(credit_box, 2)
+
+        # Cost Preview Box
+        cost_box = QFrame()
+        cost_box.setStyleSheet("""
+            QFrame {
+                background-color: rgba(30, 41, 59, 0.6);
+                border-left: 3px solid rgba(148, 163, 184, 0.6);
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+        """)
+        cost_box_layout = QVBoxLayout(cost_box)
+        cost_box_layout.setSpacing(4)
+        cost_box_layout.setContentsMargins(10, 8, 10, 8)
+
+        cost_label = QLabel("⚡ This Generation")
+        cost_label.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600; background: transparent;")
+        cost_box_layout.addWidget(cost_label)
+
+        self.cloud_cost_value = QLabel("Select resolution to see cost")
+        self.cloud_cost_value.setStyleSheet("color: #cbd5e1; font-size: 12px; font-weight: 500; background: transparent;")
+        self.cloud_cost_value.setWordWrap(True)
+        cost_box_layout.addWidget(self.cloud_cost_value)
+
+        credit_row.addWidget(cost_box, 1)
+
+        cloud_opts_layout.addLayout(credit_row)
+
+        # ── Row 2: Model, Resolution, Format dropdowns ──
+        config_row = QHBoxLayout()
+        config_row.setSpacing(12)
+
+        # Model
+        model_container = QVBoxLayout()
         model_label = QLabel("Model")
         model_label.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 600;")
-        layout.addWidget(model_label)
+        model_container.addWidget(model_label)
 
-        # Model Dropdown - Available cloud models
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("modelCombo")
-        # Models: (value, display_name) - Simple names for users
         self.cloud_models = [
-            ("hitem3dv1.5", "Standard"),
-            ("hitem3dv2.0", "Enhanced"),
-            ("scene-portraitv1.5", "Portrait"),
-            ("scene-portraitv2.0", "Portrait Enhanced"),
-            ("scene-portraitv2.1", "Best Quality"),
+            ("hitem3dv1.5", "Standard v1.5"),
+            ("hitem3dv2.0", "Standard v2.0"),
+            ("scene-portraitv1.5", "Portrait v1.5"),
+            ("scene-portraitv2.0", "Portrait v2.0"),
+            ("scene-portraitv2.1", "Portrait v2.1"),
         ]
         for model_id, model_name in self.cloud_models:
             self.model_combo.addItem(model_name, model_id)
-        layout.addWidget(self.model_combo)
+        model_container.addWidget(self.model_combo)
+        config_row.addLayout(model_container, 1)
 
-        # Resolution Label
+        # Resolution
+        res_container = QVBoxLayout()
         resolution_label = QLabel("Resolution")
-        resolution_label.setStyleSheet(
-            "color: #94a3b8; font-size: 13px; font-weight: 600;"
-        )
-        layout.addWidget(resolution_label)
+        resolution_label.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 600;")
+        res_container.addWidget(resolution_label)
 
-        # Resolution Dropdown - Updated based on model
         self.resolution_combo = QComboBox()
         self.resolution_combo.setObjectName("resolutionCombo")
-        # Default resolutions
         self.model_resolutions = {
             "hitem3dv1.5": ["512", "1024", "1536", "1536pro"],
             "hitem3dv2.0": ["1536", "1536pro"],
@@ -696,10 +780,51 @@ class MainWindow(QMainWindow):
             "scene-portraitv2.0": ["1536pro"],
             "scene-portraitv2.1": ["1536pro"],
         }
-        # Set default resolutions for first model
         for res in self.model_resolutions["hitem3dv1.5"]:
-            self.resolution_combo.addItem(res, res)
-        layout.addWidget(self.resolution_combo)
+            display = "1536³ Pro" if res == "1536pro" else f"{res}³"
+            self.resolution_combo.addItem(display, res)
+        res_container.addWidget(self.resolution_combo)
+        config_row.addLayout(res_container, 1)
+
+        # Format
+        fmt_container = QVBoxLayout()
+        format_label = QLabel("Format")
+        format_label.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 600;")
+        fmt_container.addWidget(format_label)
+
+        self.format_combo = QComboBox()
+        self.format_combo.setObjectName("formatCombo")
+        for fmt_val, fmt_name in [("obj", "OBJ"), ("glb", "GLB"), ("stl", "STL"), ("fbx", "FBX"), ("usdz", "USDZ")]:
+            self.format_combo.addItem(fmt_name, fmt_val)
+        fmt_container.addWidget(self.format_combo)
+        config_row.addLayout(fmt_container, 1)
+
+        cloud_opts_layout.addLayout(config_row)
+
+        # ── Model Info Text ──
+        self.model_descriptions = {
+            "hitem3dv1.5": "Standard v1.5: General purpose 3D generation. Recommended: 1024³",
+            "hitem3dv2.0": "Standard v2.0: Enhanced quality model. Recommended: 1536³",
+            "scene-portraitv1.5": "Portrait v1.5: Specialized portrait model. Recommended: 1536³",
+            "scene-portraitv2.0": "Portrait v2.0: Enhanced portrait model. Recommended: 1536³ Pro",
+            "scene-portraitv2.1": "Portrait v2.1: Best quality portrait. Recommended: 1536³ Pro",
+        }
+        self.model_info_label = QLabel(self.model_descriptions.get("hitem3dv1.5", ""))
+        self.model_info_label.setStyleSheet("""
+            color: #93c5fd;
+            font-size: 11px;
+            padding: 6px 10px;
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid #3b82f6;
+            border-radius: 4px;
+        """)
+        self.model_info_label.setWordWrap(True)
+        cloud_opts_layout.addWidget(self.model_info_label)
+
+        layout.addWidget(self.cloud_options_widget)
+
+        # Initially hide cloud options (Local is selected by default)
+        self.cloud_options_widget.setVisible(False)
 
         layout.addStretch()
 
@@ -946,6 +1071,9 @@ class MainWindow(QMainWindow):
 
         # Model selection - update resolutions when model changes
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+
+        # Resolution change - update cost preview
+        self.resolution_combo.currentIndexChanged.connect(self._update_cost_preview)
 
         # Action buttons
         self.reset_btn.clicked.connect(self._on_reset)
@@ -1267,17 +1395,22 @@ class MainWindow(QMainWindow):
         self._load_stylesheet()
 
     def _on_method_changed(self, button):
-        """Handle method selection change."""
-        if button == self.method_group.button(0):
-            self.local_card.setObjectName("methodCardSelected")
-            self.cloud_card.setObjectName("methodCard")
-        else:
+        """Handle method selection change — show/hide cloud options."""
+        is_cloud = button == self.method_group.button(1)
+        if is_cloud:
             self.cloud_card.setObjectName("methodCardSelected")
             self.local_card.setObjectName("methodCard")
+            self.cloud_options_widget.setVisible(True)
+            # Refresh credit info when switching to cloud
+            self._refresh_cloud_credit_display()
+        else:
+            self.local_card.setObjectName("methodCardSelected")
+            self.cloud_card.setObjectName("methodCard")
+            self.cloud_options_widget.setVisible(False)
         self._load_stylesheet()
 
     def _on_model_changed(self, index):
-        """Handle model selection change - update available resolutions."""
+        """Handle model selection change - update available resolutions and info."""
         model_id = self.model_combo.currentData()  # Get the model ID
         resolutions = self.model_resolutions.get(model_id, ["1024", "1536", "1536pro"])
 
@@ -1288,14 +1421,138 @@ class MainWindow(QMainWindow):
         self.resolution_combo.blockSignals(True)
         self.resolution_combo.clear()
         for res in resolutions:
-            self.resolution_combo.addItem(res, res)
+            display = "1536³ Pro" if res == "1536pro" else f"{res}³"
+            self.resolution_combo.addItem(display, res)
 
         # Try to restore previous selection or default to highest
         if current_res in resolutions:
-            self.resolution_combo.setCurrentText(current_res)
+            idx = resolutions.index(current_res)
+            self.resolution_combo.setCurrentIndex(idx)
         else:
             self.resolution_combo.setCurrentIndex(len(resolutions) - 1)  # Highest res
         self.resolution_combo.blockSignals(False)
+
+        # Update model info text
+        if hasattr(self, 'model_info_label') and hasattr(self, 'model_descriptions'):
+            desc = self.model_descriptions.get(model_id, "")
+            self.model_info_label.setText(desc)
+
+        # Update cost preview
+        self._update_cost_preview()
+
+    def _update_cost_preview(self):
+        """Update the cost preview box based on current resolution and credit balance."""
+        if not hasattr(self, 'cloud_cost_value'):
+            return
+
+        res = self.resolution_combo.currentData() or "1024"
+        cost = CREDIT_COSTS.get(res, 20)
+
+        # Get cached credit info
+        trial_remaining = getattr(self, '_cached_trial_remaining', 0)
+        credits_balance = getattr(self, '_cached_credits_balance', 0)
+
+        if trial_remaining > 0:
+            self.cloud_cost_value.setText("FREE (trial) — 0 credits")
+            self.cloud_cost_value.setStyleSheet("color: #a7f3d0; font-size: 12px; font-weight: 600; background: transparent;")
+            # Update cost box border to green
+            self.cloud_cost_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(21, 128, 61, 0.15);
+                    border-left: 3px solid #22c55e;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+        elif credits_balance >= cost:
+            remaining = credits_balance - cost
+            self.cloud_cost_value.setText(f"Cost: {cost} credits → {remaining} left after")
+            self.cloud_cost_value.setStyleSheet("color: #a7f3d0; font-size: 12px; font-weight: 600; background: transparent;")
+            self.cloud_cost_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(21, 128, 61, 0.15);
+                    border-left: 3px solid #22c55e;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+        else:
+            self.cloud_cost_value.setText(f"Need {cost} credits, have {credits_balance} ❌")
+            self.cloud_cost_value.setStyleSheet("color: #fecdd3; font-size: 12px; font-weight: 600; background: transparent;")
+            self.cloud_cost_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(127, 29, 29, 0.2);
+                    border-left: 3px solid #ef4444;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+
+    def _refresh_cloud_credit_display(self):
+        """Refresh the inline credit display in the cloud options section."""
+        from core.credit_manager import get_user_balance
+
+        user_id = self.session_manager.user_id
+        if not user_id or not self.session_manager.is_authenticated:
+            self.cloud_credit_value.setText("Not logged in")
+            self._cached_trial_remaining = 0
+            self._cached_credits_balance = 0
+            self._update_cost_preview()
+            return
+
+        balance_info = get_user_balance(
+            user_id, self.session_manager.device_fingerprint
+        )
+
+        if "error" in balance_info:
+            self.cloud_credit_value.setText("Error loading")
+            self._cached_trial_remaining = 0
+            self._cached_credits_balance = 0
+            self._update_cost_preview()
+            return
+
+        trial = balance_info.get("trial_remaining", 0)
+        credits = balance_info.get("credits_balance", 0)
+
+        # Cache for cost preview
+        self._cached_trial_remaining = trial
+        self._cached_credits_balance = credits
+
+        if trial > 0:
+            self.cloud_credit_value.setText(f"🎁 Trial: {trial} free generation(s)")
+            self.cloud_credit_value.setStyleSheet("color: #a7f3d0; font-size: 16px; font-weight: 700; background: transparent;")
+            self.cloud_credit_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(21, 128, 61, 0.15);
+                    border-left: 3px solid #22c55e;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+        elif credits > 0:
+            self.cloud_credit_value.setText(f"{credits} credits")
+            self.cloud_credit_value.setStyleSheet("color: #a7f3d0; font-size: 16px; font-weight: 700; background: transparent;")
+            self.cloud_credit_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(21, 128, 61, 0.15);
+                    border-left: 3px solid #22c55e;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+        else:
+            self.cloud_credit_value.setText("0 credits")
+            self.cloud_credit_value.setStyleSheet("color: #fecdd3; font-size: 16px; font-weight: 700; background: transparent;")
+            self.cloud_credit_value.parentWidget().setStyleSheet("""
+                QFrame {
+                    background-color: rgba(127, 29, 29, 0.2);
+                    border-left: 3px solid #ef4444;
+                    border-radius: 4px;
+                    padding: 8px 12px;
+                }
+            """)
+
+        self._update_cost_preview()
 
     def _on_drag_enter(self, event: QDragEnterEvent):
         """Handle drag enter event."""
@@ -1385,18 +1642,24 @@ class MainWindow(QMainWindow):
             self.method_group.button(1).setChecked(True)  # Cloud API
 
             # Set to Best Quality (best model)
-            self.model_combo.setCurrentText("Best Quality")
+            self.model_combo.setCurrentText("Portrait v2.1")
 
             # Set to highest resolution (1536pro)
-            self.resolution_combo.setCurrentText("1536pro")
+            for i in range(self.resolution_combo.count()):
+                if self.resolution_combo.itemData(i) == "1536pro":
+                    self.resolution_combo.setCurrentIndex(i)
+                    break
 
-            # Disable switching during trial
+            # Show cloud options and disable switching during trial
+            self.cloud_options_widget.setVisible(True)
             self.method_group.setExclusive(False)
             self.method_group.button(0).setEnabled(False)  # Disable Local
             self.method_group.setExclusive(True)
             self.model_combo.setEnabled(False)
             self.resolution_combo.setEnabled(False)
-            self._add_log("🎯 Trial: Cloud API + Best Quality + 1536pro enforced")
+            self._add_log("🎯 Trial: Cloud API + Best Quality + 1536³ Pro enforced")
+            # Refresh cloud credit display
+            self._refresh_cloud_credit_display()
 
     def _refresh_credit_balance(self):
         """Refresh the credit balance display."""
@@ -1438,9 +1701,13 @@ class MainWindow(QMainWindow):
         if trial_used == 0 and credits == 0:
             # User is in trial period - force cloud API and best model
             self.method_group.button(1).setChecked(True)  # Cloud API
-            self.model_combo.setCurrentText("HItem3D Portrait v2.1 (Best)")
-            self.resolution_combo.setCurrentText("1536pro")
-            # Disable switching during trial
+            self.model_combo.setCurrentText("Portrait v2.1")
+            for i in range(self.resolution_combo.count()):
+                if self.resolution_combo.itemData(i) == "1536pro":
+                    self.resolution_combo.setCurrentIndex(i)
+                    break
+            # Show cloud options and disable switching during trial
+            self.cloud_options_widget.setVisible(True)
             self.method_group.setExclusive(False)
             self.method_group.button(0).setEnabled(False)  # Disable Local
             self.method_group.setExclusive(True)
@@ -1462,6 +1729,10 @@ class MainWindow(QMainWindow):
                 "color: #f87171; font-size: 14px; font-weight: 600;"
             )
         self.used_value.setText(f"{used}")
+
+        # Also refresh cloud credit display if visible
+        if hasattr(self, 'cloud_options_widget') and self.cloud_options_widget.isVisible():
+            self._refresh_cloud_credit_display()
 
     def _on_buy_credits(self):
         """Open credit purchase dialog."""
@@ -1543,9 +1814,9 @@ class MainWindow(QMainWindow):
             api_model = "scene-portraitv2.1"
             api_resolution = "1536pro"
             # Update UI to reflect trial selection
-            self.model_combo.setCurrentText("HItem3D Portrait v2.1 (Best)")
+            self.model_combo.setCurrentText("Portrait v2.1")
             self._add_log(
-                "🎯 Trial: Using Best Quality with 1536pro resolution - FREE first generation!"
+                "🎯 Trial: Using Best Quality with 1536³ Pro resolution - FREE first generation!"
             )
 
         # Check credits BEFORE generation
@@ -1571,12 +1842,14 @@ class MainWindow(QMainWindow):
         model_id = api_model
 
         # Deduct credits BEFORE starting generation
+        # Use format from dropdown if cloud mode
+        selected_format = self.format_combo.currentData() if hasattr(self, 'format_combo') else "glb"
         deduction = deduct_credits(
             self.session_manager.user_id,
             api_resolution,
             model_id,
             input_type="image",
-            output_format="glb",
+            output_format=selected_format,
             is_trial=is_trial,
             device_fingerprint=self.session_manager.device_fingerprint,
         )
@@ -1623,13 +1896,20 @@ class MainWindow(QMainWindow):
         self.start_time = datetime.now()
         self.timer.start(1000)
 
+        # Get output formats from format combo if available
+        output_formats = ["obj", "stl", "glb"]
+        if hasattr(self, 'format_combo'):
+            selected_fmt = self.format_combo.currentData()
+            if selected_fmt and selected_fmt not in output_formats:
+                output_formats.append(selected_fmt)
+
         # Ensure selected_file is not None (it's checked above)
         self.worker = GenerationWorker(
             str(self.selected_file),  # Convert to string explicitly
             model,  # "local" or "cloud"
             api_resolution,  # Resolution
             api_model,  # Model ID for cloud
-            ["obj", "stl", "glb"],
+            output_formats,
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.status.connect(self._on_status)

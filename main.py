@@ -65,6 +65,10 @@ def main():
     # Initialize session manager
     session_manager = SessionManager()
     
+    # Initialize payment sync
+    from core.payment_config_sync import initialize_payment_sync
+    initialize_payment_sync()
+    
     # If not authenticated via saved session, try automatic device login 
     if not session_manager.is_authenticated:
         # This will sign in with device fingerprint (the default flow)

@@ -23,6 +23,7 @@ from core.razorpay_client import (
     validate_razorpay_config,
 )
 from core.credit_manager import CREDIT_PACKS, get_user_balance, add_credits
+from core.payment_config_sync import get_credit_packs
 from core.logger import get_logger
 from core.supabase_client import get_supabase
 
@@ -126,7 +127,7 @@ class PaymentHandler(QObject):
             logger.error("Payment handler not available")
             return None
 
-        pack_info = CREDIT_PACKS.get(pack_id)
+        pack_info = get_credit_packs().get(pack_id) or CREDIT_PACKS.get(pack_id)
         if not pack_info:
             logger.error(f"Invalid pack ID: {pack_id}")
             return None
@@ -240,7 +241,7 @@ class PaymentHandler(QObject):
         order_id = order["id"]
 
         # Open payment page using Payment Link approach (simpler)
-        pack_info = CREDIT_PACKS.get(pack_id)
+        pack_info = get_credit_packs().get(pack_id) or CREDIT_PACKS.get(pack_id)
         if pack_info and pack_info.get("razorpay_id"):
             # Use existing Payment Link
             razorpay_link_id = pack_info["razorpay_id"]
